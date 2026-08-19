@@ -14,7 +14,8 @@
 
 import type { Sector, Segment } from "../domain/sectors";
 import type { MarketConditions } from "../domain/countries";
-import { summariseGap, type TradeFlow, type TradeGap } from "../signals/comtrade";
+import { summariseGap, type TradeData, type TradeGap } from "../signals/comtrade";
+import type { SegmentDensity } from "../signals/osm";
 import { confidenceOver, read, type SignalBundle } from "../signals/types";
 import { INDICATORS } from "../signals/worldbank";
 
@@ -56,6 +57,10 @@ export interface Opportunity {
   risks: string[];
   /** Realistic months to first revenue, surfaced for sequencing decisions. */
   timeToRevenueMonths: number;
+  /** Observed premise density, where this segment is countable on the ground. */
+  density: SegmentDensity | null;
+  /** True when a 6-digit product breakdown can be fetched for this segment. */
+  hasProductDetail: boolean;
 }
 
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n));
@@ -191,11 +196,21 @@ export interface ScoreInput {
   bundle: SignalBundle;
   conditions: MarketConditions;
   conditionsCurated: boolean;
-  flows: Map<string, TradeFlow>;
+  trade: TradeData;
+  /** Supply-side saturation from mapped premises, where measurable. */
+  density?: SegmentDensity;
 }
 
 export function scoreSegment(input: ScoreInput): Opportunity {
-  const { sector, segment, bundle, conditions, conditionsCurated, flows } = input;
+  const {
+    sector,
+    segment,
+    bundle,
+    conditions,
+    conditionsCurated,
+    trade,
+    density,
+  } = input;
 
   const gdp = read(bundle, "gdp", 0);
   const gdpPerCapita = read(bundle, "gdpPerCapita", 5000);
@@ -207,7 +222,7 @@ export function scoreSegment(input: ScoreInput): Opportunity {
 
   // ---- 1. Unmet demand ----------------------------------------------------
   const gap: TradeGap | null =
-    segment.hsCodes.length > 0 ? summariseGap(flows, segment.hsCodes) : null;
+    segment.hsCodes.length > 0 ? summariseGap(trade, segment.hsCodes) : null;
 
   let unmetDemand: number;
   let addressableUsd: number | null = null;
@@ -218,7 +233,17 @@ export function scoreSegment(input: ScoreInput): Opportunity {
     const substitutable = segment.importSubstitutability;
     const magnitude = logScale(Math.max(gap.netImports, 0), 5e5, 3e9);
 
-    unmetDemand = 100 * clamp01(0.5 * dependency * substitutable + 0.5 * magnitude);
+    let base = 0.5 * dependency * substitutable + 0.5 * magnitude;
+
+    // A gap that is widening is worth more than a static one of equal size:
+    // demand is outrunning domestic supply, so the opening is still growing.
+    // A closing gap means someone is already filling it.
+    if (gap.trendPct !== null) {
+      const trendAdjust = clamp01((gap.trendPct + 15) / 45) - 0.5; // -0.5..+0.5
+      base = clamp01(base + trendAdjust * 0.18);
+    }
+
+    unmetDemand = 100 * clamp01(base);
     addressableUsd = Math.max(gap.netImports, 0) * substitutable;
 
     evidence.push({
@@ -227,6 +252,23 @@ export function scoreSegment(input: ScoreInput): Opportunity {
       source: `UN Comtrade, ${gap.year}`,
       provenance: "live",
     });
+
+    if (gap.trendPct !== null && gap.trendBaseYear) {
+      const widening = gap.trendPct > 0;
+      evidence.push({
+        label: widening ? "Gap widening" : "Gap closing",
+        detail: widening
+          ? `Net imports have grown ${gap.trendPct.toFixed(1)}%/yr since ${gap.trendBaseYear}. Domestic supply is falling further behind demand, so the opening is still growing.`
+          : `Net imports have shrunk ${Math.abs(gap.trendPct).toFixed(1)}%/yr since ${gap.trendBaseYear}. Someone is already closing this gap — entering later means meeting them head-on.`,
+        source: `UN Comtrade, ${gap.trendBaseYear} vs ${gap.year}`,
+        provenance: "live",
+      });
+      if (!widening && gap.trendPct < -8) {
+        risks.push(
+          `The import gap is closing at ${Math.abs(gap.trendPct).toFixed(1)}%/yr — domestic capacity is already being built. Verify who is doing it before committing.`,
+        );
+      }
+    }
 
     if (substitutable < 0.6) {
       evidence.push({
@@ -386,6 +428,30 @@ export function scoreSegment(input: ScoreInput): Opportunity {
     headroom = 100 * clamp01(0.4 + conditions.informality * 0.5);
   }
 
+  // Where premises are actually countable, let observed saturation adjust the
+  // estimate. Bounded to +/-22 points: the reference shares it compares
+  // against are curated approximations, so this refines the structural
+  // estimate rather than overriding it.
+  if (density) {
+    const pull = clamp01((density.saturation - 1) / 2); // 0 at parity, 1 at 3x
+    const relief = clamp01((1 - density.saturation) / 1); // 0 at parity, 1 at 0x
+    headroom = clamp01((headroom + (relief - pull) * 22) / 100) * 100;
+
+    const denser = density.saturation > 1;
+    evidence.push({
+      label: denser ? "Already well served" : "Thin on the ground",
+      detail: `${density.count.toLocaleString()} ${density.label} are mapped here — ${(density.share * 100).toFixed(1)}% of the country's mapped commercial premises, against a reference of ${(density.referenceShare * 100).toFixed(1)}%. That is ${density.saturation.toFixed(2)}x typical density${population > 0 ? `, or ${density.perMillion.toFixed(0)} per million people` : ""}.`,
+      source: "OpenStreetMap via Overpass",
+      provenance: "live",
+    });
+
+    if (density.saturation > 1.6) {
+      risks.push(
+        `This category is already ${density.saturation.toFixed(1)}x more densely served than a typical market — expect to compete on differentiation rather than availability.`,
+      );
+    }
+  }
+
   // ---- Composite ----------------------------------------------------------
   const components: ScoreComponents = {
     unmetDemand,
@@ -411,8 +477,13 @@ export function scoreSegment(input: ScoreInput): Opportunity {
   ]);
   const tradeConfidence = gap?.observed ? 0.95 : 0.5;
   const conditionsConfidence = conditionsCurated ? 0.9 : 0.5;
+  // An independently observed supply side is a genuine second leg to stand on.
+  const densityBonus = density ? 0.05 : 0;
   const confidence = clamp01(
-    signalConfidence * 0.4 + tradeConfidence * 0.4 + conditionsConfidence * 0.2,
+    signalConfidence * 0.4 +
+      tradeConfidence * 0.4 +
+      conditionsConfidence * 0.2 +
+      densityBonus,
   );
 
   if (!conditionsCurated) {
@@ -435,6 +506,8 @@ export function scoreSegment(input: ScoreInput): Opportunity {
     evidence,
     risks,
     timeToRevenueMonths: segment.timeToRevenueMonths,
+    density: density ?? null,
+    hasProductDetail: Boolean(gap?.observed && segment.hsCodes.length > 0),
   };
 }
 

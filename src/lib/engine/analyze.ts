@@ -12,9 +12,14 @@ import {
   type MarketConditions,
 } from "../domain/countries";
 import { SECTOR_BY_ID, type Sector } from "../domain/sectors";
-import { fetchTradeFlows, type TradeFlow } from "../signals/comtrade";
+import {
+  EMPTY_TRADE_DATA,
+  fetchTradeFlows,
+  type TradeData,
+} from "../signals/comtrade";
+import { EMPTY_DENSITY, fetchDensity } from "../signals/osm";
 import { fetchWorldBank } from "../signals/worldbank";
-import type { SignalBundle } from "../signals/types";
+import { read, type SignalBundle } from "../signals/types";
 import { scoreSegment, type Opportunity } from "./score";
 
 export interface MacroSnapshot {
@@ -98,12 +103,22 @@ export async function analyzeSector(
 
   const currentYear = new Date().getUTCFullYear();
   const bundle = await fetchWorldBank(iso3, currentYear);
+  const population = read(bundle, "population", 0);
 
   const hsCodes = sectorHsCodes(sector);
-  let flows: Map<string, TradeFlow> = new Map();
-  if (hsCodes.length > 0) {
-    flows = await fetchTradeFlows(iso3, hsCodes, currentYear, bundle);
-  }
+  const segmentIds = sector.segments.map((s) => s.id);
+
+  // Comtrade and Overpass are unrelated upstreams, so run them concurrently:
+  // the sector view costs one round trip, not two. Comtrade's own request
+  // queue still serialises its internal year probes.
+  const [trade, density] = await Promise.all([
+    hsCodes.length > 0
+      ? fetchTradeFlows(iso3, hsCodes, currentYear, bundle)
+      : Promise.resolve<TradeData>(EMPTY_TRADE_DATA),
+    fetchDensity(country.iso2, segmentIds, population, bundle).catch(
+      () => EMPTY_DENSITY,
+    ),
+  ]);
 
   const { conditions, curated } = conditionsFor(country);
 
@@ -115,7 +130,8 @@ export async function analyzeSector(
         bundle,
         conditions,
         conditionsCurated: curated,
-        flows,
+        trade,
+        density: density.bySegment.get(segment.id),
       }),
     )
     .sort((a, b) => b.score - a.score);

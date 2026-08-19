@@ -161,6 +161,47 @@ async function queryYearWithRetry(
   return result;
 }
 
+/** Fold raw Comtrade rows into one import/export pair per HS code. */
+function rowsToFlows(rows: TradeRow[], year: number): Map<string, TradeFlow> {
+  const flows = new Map<string, TradeFlow>();
+  for (const row of rows) {
+    const value = row.primaryValue ?? 0;
+    const existing = flows.get(row.cmdCode) ?? {
+      hsCode: row.cmdCode,
+      imports: 0,
+      exports: 0,
+      year: String(year),
+    };
+    if (row.flowCode === "M") existing.imports += value;
+    if (row.flowCode === "X") existing.exports += value;
+    flows.set(row.cmdCode, existing);
+  }
+  return flows;
+}
+
+export interface TradeData {
+  /** Latest reporting year with data. */
+  current: Map<string, TradeFlow>;
+  /** Roughly three years earlier, for trajectory. Null if unavailable. */
+  baseline: Map<string, TradeFlow> | null;
+  currentYear: number | null;
+  baselineYear: number | null;
+}
+
+export const EMPTY_TRADE_DATA: TradeData = {
+  current: new Map(),
+  baseline: null,
+  currentYear: null,
+  baselineYear: null,
+};
+
+/**
+ * How many years back to look for the trajectory baseline. Three years is far
+ * enough that a single volatile year does not dominate, close enough that the
+ * comparison still describes the current market.
+ */
+const TREND_LOOKBACK = 3;
+
 /**
  * Fetch import/export values for a set of HS codes, returning one flow per
  * code. Codes with no reported trade are omitted rather than zero-filled — a
@@ -171,7 +212,7 @@ export async function fetchTradeFlows(
   hsCodes: string[],
   currentYear: number,
   bundle: SignalBundle,
-): Promise<Map<string, TradeFlow>> {
+): Promise<TradeData> {
   const flows = new Map<string, TradeFlow>();
   const reporterCode = REPORTER_CODES[iso3];
 
@@ -179,9 +220,9 @@ export async function fetchTradeFlows(
     bundle.warnings.push(
       `${iso3} is not a Comtrade reporter — trade-gap analysis unavailable, scores fall back to demand modelling.`,
     );
-    return flows;
+    return EMPTY_TRADE_DATA;
   }
-  if (hsCodes.length === 0) return flows;
+  if (hsCodes.length === 0) return EMPTY_TRADE_DATA;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20000);
@@ -224,7 +265,7 @@ export async function fetchTradeFlows(
           ? "UN Comtrade rate limit reached, so trade gaps in this sector are modelled rather than observed. Retry shortly, or set COMTRADE_API_KEY for higher limits."
           : `Comtrade returned no trade records for ${iso3} in the last four reporting years.`,
       );
-      return flows;
+      return EMPTY_TRADE_DATA;
     }
 
     // The preview endpoint caps at 500 rows. With aggregate pinning we expect
@@ -236,17 +277,23 @@ export async function fetchTradeFlows(
       );
     }
 
-    for (const row of rows) {
-      const value = row.primaryValue ?? 0;
-      const existing = flows.get(row.cmdCode) ?? {
-        hsCode: row.cmdCode,
-        imports: 0,
-        exports: 0,
-        year: String(usedYear),
-      };
-      if (row.flowCode === "M") existing.imports += value;
-      if (row.flowCode === "X") existing.exports += value;
-      flows.set(row.cmdCode, existing);
+    const currentFlows = rowsToFlows(rows, usedYear);
+    for (const [code, flow] of currentFlows) flows.set(code, flow);
+
+    // Trajectory baseline. A failure here is not fatal — the gap is still
+    // reported, just without a direction of travel.
+    let baseline: Map<string, TradeFlow> | null = null;
+    let baselineYear: number | null = null;
+    const baseTarget = usedYear - TREND_LOOKBACK;
+    const baseResult = await queryYearWithRetry(
+      reporterCode,
+      hsCodes,
+      baseTarget,
+      controller.signal,
+    );
+    if (baseResult.status === "ok") {
+      baseline = rowsToFlows(baseResult.rows, baseTarget);
+      baselineYear = baseTarget;
     }
 
     // Record the aggregate as a signal so the UI can cite it.
@@ -275,15 +322,21 @@ export async function fetchTradeFlows(
       period: String(usedYear),
       confidence: currentYear - usedYear <= 2 ? 0.95 : 0.75,
     });
+
+    return {
+      current: flows,
+      baseline,
+      currentYear: usedYear,
+      baselineYear,
+    };
   } catch (err) {
     bundle.warnings.push(
       `Comtrade request failed (${err instanceof Error ? err.message : "unknown error"}); trade gaps for this sector are modelled, not observed.`,
     );
+    return EMPTY_TRADE_DATA;
   } finally {
     clearTimeout(timeout);
   }
-
-  return flows;
 }
 
 export interface TradeGap {
@@ -300,12 +353,115 @@ export interface TradeGap {
   importDependency: number;
   year: string;
   observed: boolean;
+  /**
+   * Annualised change in net imports, percent. A widening gap means demand is
+   * outrunning domestic supply — the opportunity is opening, not closing. Null
+   * when no comparable earlier year could be fetched.
+   */
+  trendPct: number | null;
+  /** The earlier year the trend was measured against. */
+  trendBaseYear: string | null;
 }
 
-export function summariseGap(
+/** One 6-digit product line within a segment. */
+export interface ProductGap {
+  hsCode: string;
+  description: string;
+  imports: number;
+  exports: number;
+  netImports: number;
+  importDependency: number;
+}
+
+/**
+ * Comtrade accepts long cmdCode lists (129 verified), but not unbounded ones.
+ * Batching is capped so a single drill-down cannot spend a minute in the
+ * rate-limit queue: 2 batches x 120 codes covers every segment we define
+ * except the very largest chapters, which are truncated with a warning.
+ */
+const PRODUCT_BATCH_SIZE = 120;
+const MAX_PRODUCT_BATCHES = 2;
+
+/**
+ * Resolve a segment's HS prefixes down to individual 6-digit product lines and
+ * report which of them carry the import gap. This is what turns "Dairy,
+ * $269M" into "milk and cream, concentrated — $47M", which is the level a
+ * business decision is actually made at.
+ */
+export async function fetchProductGaps(
+  iso3: string,
+  codes6: string[],
+  descriptions: Record<string, string>,
+  year: number,
+  bundle: SignalBundle,
+): Promise<ProductGap[]> {
+  const reporterCode = REPORTER_CODES[iso3];
+  if (!reporterCode || codes6.length === 0) return [];
+
+  const batches: string[][] = [];
+  for (let i = 0; i < codes6.length; i += PRODUCT_BATCH_SIZE) {
+    batches.push(codes6.slice(i, i + PRODUCT_BATCH_SIZE));
+  }
+  if (batches.length > MAX_PRODUCT_BATCHES) {
+    const dropped = batches
+      .slice(MAX_PRODUCT_BATCHES)
+      .reduce((n, b) => n + b.length, 0);
+    bundle.warnings.push(
+      `This segment spans ${codes6.length} product lines; the ${dropped} smallest-chapter lines were not queried to keep the request within rate limits.`,
+    );
+    batches.length = MAX_PRODUCT_BATCHES;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
+  const totals = new Map<string, { m: number; x: number }>();
+
+  try {
+    for (const batch of batches) {
+      const result = await queryYearWithRetry(
+        reporterCode,
+        batch,
+        year,
+        controller.signal,
+      );
+      if (result.status !== "ok") continue;
+      if (result.rows.length >= 500) {
+        bundle.warnings.push(
+          "Product drill-down hit the 500-row preview cap; some lines are missing. Set COMTRADE_API_KEY to lift it.",
+        );
+      }
+      for (const row of result.rows) {
+        const entry = totals.get(row.cmdCode) ?? { m: 0, x: 0 };
+        if (row.flowCode === "M") entry.m += row.primaryValue ?? 0;
+        if (row.flowCode === "X") entry.x += row.primaryValue ?? 0;
+        totals.set(row.cmdCode, entry);
+      }
+    }
+  } catch (err) {
+    bundle.warnings.push(
+      `Product drill-down failed (${err instanceof Error ? err.message : "unknown error"}).`,
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  return Array.from(totals.entries())
+    .map(([hsCode, v]) => ({
+      hsCode,
+      description: descriptions[hsCode] ?? `HS ${hsCode}`,
+      imports: v.m,
+      exports: v.x,
+      netImports: v.m - v.x,
+      importDependency: v.m + v.x > 0 ? v.m / (v.m + v.x) : 0,
+    }))
+    .filter((p) => p.netImports > 0)
+    .sort((a, b) => b.netImports - a.netImports);
+}
+
+function totalsFor(
   flows: Map<string, TradeFlow>,
   hsCodes: string[],
-): TradeGap {
+): { imports: number; exports: number; year: string; observed: boolean } {
   let imports = 0;
   let exports = 0;
   let year = "";
@@ -319,14 +475,38 @@ export function summariseGap(
     exports += flow.exports;
     year = flow.year;
   }
+  return { imports, exports, year, observed };
+}
 
-  const total = imports + exports;
+export function summariseGap(data: TradeData, hsCodes: string[]): TradeGap {
+  const now = totalsFor(data.current, hsCodes);
+  const total = now.imports + now.exports;
+  const netImports = now.imports - now.exports;
+
+  let trendPct: number | null = null;
+  let trendBaseYear: string | null = null;
+
+  if (data.baseline && data.baselineYear && data.currentYear) {
+    const before = totalsFor(data.baseline, hsCodes);
+    const beforeNet = before.imports - before.exports;
+    const years = data.currentYear - data.baselineYear;
+    // A CAGR is only meaningful when both endpoints are positive net imports.
+    // A gap that flipped sign (net importer to net exporter, or back) is a
+    // structural change that a growth rate would misrepresent.
+    if (before.observed && beforeNet > 0 && netImports > 0 && years > 0) {
+      trendPct = (Math.pow(netImports / beforeNet, 1 / years) - 1) * 100;
+      trendBaseYear = String(data.baselineYear);
+    }
+  }
+
   return {
-    imports,
-    exports,
-    netImports: imports - exports,
-    importDependency: total > 0 ? imports / total : 0,
-    year,
-    observed,
+    imports: now.imports,
+    exports: now.exports,
+    netImports,
+    importDependency: total > 0 ? now.imports / total : 0,
+    year: now.year,
+    observed: now.observed,
+    trendPct,
+    trendBaseYear,
   };
 }

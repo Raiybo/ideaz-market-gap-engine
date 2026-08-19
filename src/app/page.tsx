@@ -208,7 +208,12 @@ export default function Home() {
             </div>
 
             {data.opportunities.map((o, i) => (
-              <OpportunityCard key={o.segmentId} opportunity={o} rank={i + 1} />
+              <OpportunityCard
+                key={o.segmentId}
+                opportunity={o}
+                rank={i + 1}
+                country={data.country.iso3}
+              />
             ))}
           </section>
 
