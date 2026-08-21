@@ -14,11 +14,8 @@
  * actually the cheap one.
  */
 
-import {
-  COUNTRY_BY_ISO3,
-  conditionsFor,
-  type MarketConditions,
-} from "../domain/countries";
+import { resolveConditions, type ConditionField } from "../domain/conditions";
+import { COUNTRY_BY_ISO3, type MarketConditions } from "../domain/countries";
 import { expandToProductCodes, HS_DESCRIPTIONS } from "../domain/hs";
 import { SECTORS, SECTOR_BY_ID, type Sector } from "../domain/sectors";
 import {
@@ -31,11 +28,64 @@ import {
 } from "../signals/comtrade";
 import { EMPTY_DENSITY, fetchDensity } from "../signals/osm";
 import { fetchWorldBank } from "../signals/worldbank";
-import { read } from "../signals/types";
-import { buildMacro, type MacroSnapshot } from "./analyze";
+import { read, type SignalBundle } from "../signals/types";
+
 import { buildPlaybook, type Playbook } from "./playbook";
 import { formatUsd, scoreSegment, type Opportunity } from "./score";
 import { NULL_TRACER, type Tracer } from "./trace";
+
+export interface MacroSnapshot {
+  label: string;
+  value: string;
+  period: string;
+  source: string;
+  /** Source registry id, so the UI can link the figure to its publisher. */
+  sourceId: string;
+}
+
+function formatNumber(value: number, unit: string): string {
+  if (unit === "USD") {
+    if (value >= 1e12) return `$${(value / 1e12).toFixed(2)}T`;
+    if (value >= 1e9) return `$${(value / 1e9).toFixed(1)}B`;
+    if (value >= 1e6) return `$${(value / 1e6).toFixed(1)}M`;
+    return `$${value.toFixed(0)}`;
+  }
+  if (unit === "people" || unit === "arrivals") {
+    if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+    if (value >= 1e3) return `${(value / 1e3).toFixed(0)}K`;
+    return value.toFixed(0);
+  }
+  if (unit.startsWith("%")) return `${value.toFixed(1)}%`;
+  return value.toFixed(1);
+}
+
+const MACRO_KEYS: Array<{ key: string; label: string }> = [
+  { key: "gdp", label: "GDP" },
+  { key: "gdpPerCapita", label: "GDP per capita" },
+  { key: "population", label: "Population" },
+  { key: "gdpGrowth", label: "GDP growth" },
+  { key: "inflation", label: "Inflation" },
+  { key: "unemployment", label: "Unemployment" },
+  { key: "importsShare", label: "Imports (% GDP)" },
+  { key: "remittances", label: "Remittances (% GDP)" },
+];
+
+function buildMacro(bundle: SignalBundle): MacroSnapshot[] {
+  const out: MacroSnapshot[] = [];
+  for (const { key, label } of MACRO_KEYS) {
+    const signal = bundle.signals.get(key);
+    if (!signal) continue;
+    out.push({
+      label,
+      value: formatNumber(signal.value, signal.unit),
+      period: signal.period ?? "—",
+      source: signal.source,
+      sourceId: "worldbank",
+    });
+  }
+  return out;
+}
+
 
 export interface Finding extends Opportunity {
   playbook: Playbook;
@@ -62,6 +112,8 @@ export interface CountryScan {
   macro: MacroSnapshot[];
   conditions: MarketConditions;
   conditionsCurated: boolean;
+  /** Per-dimension provenance, so each condition can cite its own source. */
+  conditionFields: ConditionField[];
   warnings: string[];
   generatedAt: string;
   /** Wall-clock cost of the scan, so the cache saving is visible. */
@@ -77,13 +129,24 @@ export interface ScanOptions {
   tracer?: Tracer;
   /** Fetch the largest product line for the top findings. */
   drillDown?: boolean;
+  /**
+   * Segments that must get a product-level beachhead regardless of where they
+   * rank. The idea assessment needs one for the segment the user actually
+   * asked about, which is frequently not in the top three.
+   */
+  drillSegments?: string[];
 }
 
 export async function scanCountry(
   iso3: string,
   options: ScanOptions = {},
 ): Promise<CountryScan> {
-  const { sectorId, tracer = NULL_TRACER, drillDown = true } = options;
+  const {
+    sectorId,
+    tracer = NULL_TRACER,
+    drillDown = true,
+    drillSegments = [],
+  } = options;
   const startedAt = Date.now();
 
   const country = COUNTRY_BY_ISO3.get(iso3);
@@ -133,7 +196,15 @@ export async function scanCountry(
 
   // ---- Scoring ------------------------------------------------------------
   tracer.phase("Scoring every segment");
-  const { conditions, curated } = conditionsFor(country);
+  const {
+    conditions,
+    curated,
+    fields: conditionFields,
+    measuredCount,
+  } = resolveConditions(country, bundle, currentYear);
+  tracer.note(
+    `${measuredCount} of 6 operating conditions derived from published indicators; the rest are researched constants.`,
+  );
   const gdpPerCapita = read(bundle, "gdpPerCapita", 5000);
 
   const findings: Finding[] = [];
@@ -220,9 +291,14 @@ export async function scanCountry(
   // request per segment, so it is spent where a decision would actually be made.
   if (drillDown && trade.currentYear && REPORTER_CODES[iso3]) {
     tracer.phase("Finding the way in");
-    const targets = findings
-      .filter((f) => f.hasProductDetail)
-      .slice(0, DRILL_DOWN_TOP_N);
+    const forced = new Set(drillSegments);
+    const eligible = findings.filter((f) => f.hasProductDetail);
+    const targets = [
+      ...eligible.filter((f) => forced.has(f.segmentId)),
+      ...eligible
+        .filter((f) => !forced.has(f.segmentId))
+        .slice(0, DRILL_DOWN_TOP_N),
+    ];
 
     for (const finding of targets) {
       const sector = sectors.find((s) => s.id === finding.sectorId);
@@ -293,6 +369,7 @@ export async function scanCountry(
     macro: buildMacro(bundle),
     conditions,
     conditionsCurated: curated,
+    conditionFields,
     warnings: bundle.warnings,
     generatedAt: new Date().toISOString(),
     elapsedMs: Date.now() - startedAt,

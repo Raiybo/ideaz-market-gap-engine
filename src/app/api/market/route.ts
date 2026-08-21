@@ -1,39 +1,38 @@
 import { NextResponse } from "next/server";
 
-import { analyzeSector } from "@/lib/engine/analyze";
-import { COUNTRY_BY_ISO3, DEFAULT_COUNTRY } from "@/lib/domain/countries";
-import { SECTOR_BY_ID, SECTORS } from "@/lib/domain/sectors";
+import { scanCountry } from "@/lib/engine/scan";
 
+/**
+ * Legacy JSON endpoint, kept for scripted callers.
+ *
+ * It now delegates to the same scan the UI uses rather than carrying its own
+ * orchestration — two code paths that resolved a country's operating
+ * conditions differently would eventually disagree, and the one nobody looks
+ * at would be the one that was wrong.
+ */
 export const revalidate = 3600;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const country = searchParams.get("country") ?? DEFAULT_COUNTRY;
-  const sector = searchParams.get("sector") ?? SECTORS[0].id;
+  const country = searchParams.get("country");
+  const sector = searchParams.get("sector");
 
-  if (!COUNTRY_BY_ISO3.has(country)) {
+  if (!country) {
     return NextResponse.json(
-      { error: `Unknown country code: ${country}` },
-      { status: 400 },
-    );
-  }
-  if (!SECTOR_BY_ID.has(sector)) {
-    return NextResponse.json(
-      { error: `Unknown sector: ${sector}` },
+      { error: "A country parameter is required." },
       { status: 400 },
     );
   }
 
   try {
-    const analysis = await analyzeSector(country, sector);
-    return NextResponse.json(analysis);
+    const scan = await scanCountry(country, {
+      sectorId: sector && sector !== "all" ? sector : undefined,
+      drillDown: searchParams.get("drill") === "1",
+    });
+    return NextResponse.json(scan);
   } catch (err) {
-    return NextResponse.json(
-      {
-        error:
-          err instanceof Error ? err.message : "Analysis failed unexpectedly.",
-      },
-      { status: 500 },
-    );
+    const message = err instanceof Error ? err.message : "Analysis failed";
+    const unknown = message.startsWith("Unknown");
+    return NextResponse.json({ error: message }, { status: unknown ? 400 : 500 });
   }
 }

@@ -3,25 +3,16 @@
 import { useMemo, useState } from "react";
 
 import { FindingCard } from "@/components/FindingCard";
+import {
+  IdeaAssessment,
+  IdeaUploader,
+} from "@/components/IdeaAssessment";
 import { ReasoningGraph } from "@/components/ReasoningGraph";
+import { SourcesPanel } from "@/components/SourcesPanel";
 import { COUNTRIES, DEFAULT_COUNTRY } from "@/lib/domain/countries";
 import { SECTORS } from "@/lib/domain/sectors";
-import type { CountryScan } from "@/lib/engine/scan";
-import { useScanStream } from "@/lib/useScanStream";
-
-const CONDITION_LABELS: Array<{
-  key: keyof CountryScan["conditions"];
-  label: string;
-  /** True when a high value is bad, so the bar can be coloured honestly. */
-  inverted: boolean;
-}> = [
-  { key: "gridReliability", label: "Grid reliability", inverted: false },
-  { key: "currencyInstability", label: "Currency instability", inverted: true },
-  { key: "capitalScarcity", label: "Capital scarcity", inverted: true },
-  { key: "importDependence", label: "Import dependence", inverted: true },
-  { key: "bureaucraticFriction", label: "Bureaucratic friction", inverted: true },
-  { key: "informality", label: "Informality", inverted: true },
-];
+import { SOURCES } from "@/lib/domain/sources";
+import { useScanStream, useValidateStream } from "@/lib/useScanStream";
 
 /** Findings shown before the list has to be asked for in full. */
 const VISIBLE_FINDINGS = 12;
@@ -33,14 +24,23 @@ function formatUsd(value: number): string {
   return `$${value.toFixed(0)}`;
 }
 
+type Mode = "find" | "test";
+
 export default function Home() {
   const [country, setCountry] = useState(DEFAULT_COUNTRY);
   const [scope, setScope] = useState("all");
   const [showAll, setShowAll] = useState(false);
   const [graphOpen, setGraphOpen] = useState(true);
+  const [mode, setMode] = useState<Mode>("find");
+  const [file, setFile] = useState<File | null>(null);
 
-  const { nodes, phase, note, running, scan, error, elapsedMs, rerun } =
-    useScanStream(country, scope);
+  const scanStream = useScanStream(country, scope, mode === "find");
+  const idea = useValidateStream();
+
+  // Both modes drive the same graph; whichever one is live owns it.
+  const active = mode === "find" ? scanStream : idea;
+  const { nodes, phase, note, running, error, elapsedMs } = active;
+  const { scan, rerun } = scanStream;
 
   const grouped = useMemo(() => {
     const byRegion = new Map<string, typeof COUNTRIES>();
@@ -112,7 +112,54 @@ export default function Home() {
         </div>
       </header>
 
+      {/* Mode. Finding a gap and testing an idea you already have are the same
+          engine pointed in opposite directions. */}
+      <div className="mb-5 flex gap-2">
+        {(
+          [
+            ["find", "Find gaps", "Rank what this market is missing"],
+            ["test", "Test my idea", "Upload a deck and have it judged"],
+          ] as Array<[Mode, string, string]>
+        ).map(([id, label, hint]) => (
+          <button
+            key={id}
+            onClick={() => setMode(id)}
+            title={hint}
+            className={`rounded-lg border px-4 py-2 text-sm transition-colors ${
+              mode === id
+                ? "border-[var(--accent)] bg-[var(--accent)]/10 font-medium text-[var(--accent)]"
+                : "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:border-[var(--muted)]"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mode === "test" && (
+        <div className="mb-5 space-y-3">
+          <IdeaUploader
+            running={idea.running}
+            fileName={file?.name ?? null}
+            onClear={() => {
+              setFile(null);
+              idea.reset();
+            }}
+            onFile={(f) => {
+              setFile(f);
+              setGraphOpen(true);
+              void idea.run(f, country);
+            }}
+          />
+          <p className="text-xs text-[var(--muted)]">
+            If the document does not name a market, it is assessed against the
+            country selected above.
+          </p>
+        </div>
+      )}
+
       {/* Scope rail — the whole country, or one sector in depth. */}
+      {mode === "find" && (
       <nav className="rail -mx-4 mb-5 flex gap-2 overflow-x-auto px-4 pb-2 sm:mx-0 sm:px-0">
         {[
           { id: "all", icon: "🌍", name: "Whole country" },
@@ -136,6 +183,7 @@ export default function Home() {
           </button>
         ))}
       </nav>
+      )}
 
       {/* Live reasoning. Stays available after the run so the result can be
           traced back to the steps that produced it. */}
@@ -167,12 +215,27 @@ export default function Home() {
         </div>
       )}
 
-      {scan && (
+      {mode === "test" && idea.assessment && (
+        <IdeaAssessment
+          assessment={idea.assessment}
+          onPickAlternative={(sectorId) => {
+            setMode("find");
+            setScope(sectorId);
+            setGraphOpen(true);
+          }}
+        />
+      )}
+
+      {mode === "find" && scan && (
         <>
           {scan.macro.length > 0 && (
             <section className="mb-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--border)] sm:grid-cols-4">
               {scan.macro.map((m) => (
-                <div key={m.label} className="bg-[var(--surface)] p-3">
+                <div
+                  key={m.label}
+                  className="bg-[var(--surface)] p-3"
+                  title={`${m.source} · ${m.period}`}
+                >
                   <p className="text-xs text-[var(--muted)]">{m.label}</p>
                   <p className="mt-0.5 font-mono text-lg tabular-nums">
                     {m.value}
@@ -276,32 +339,36 @@ export default function Home() {
           </section>
 
           <section className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
-            <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+            <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
               <h2 className="text-base font-semibold">
                 Operating conditions — {scan.country.name}
               </h2>
-              <span
-                className={`rounded-full px-2 py-0.5 text-xs ${
-                  scan.conditionsCurated
-                    ? "bg-[var(--positive)]/12 text-[var(--positive)]"
-                    : "bg-[var(--warning)]/12 text-[var(--warning)]"
-                }`}
-              >
-                {scan.conditionsCurated
-                  ? "Researched"
-                  : "Neutral defaults — not individually researched"}
+              <span className="rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs text-[var(--muted)]">
+                {
+                  scan.conditionFields.filter(
+                    (f) => f.provenance === "measured",
+                  ).length
+                }{" "}
+                of {scan.conditionFields.length} measured this scan
               </span>
             </div>
+            <p className="mb-4 text-xs text-[var(--muted)]">
+              Each dimension is derived from a published indicator where one
+              measures it, and held as a researched constant where none does.
+              Hover any figure for the derivation.
+            </p>
 
-            <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
-              {CONDITION_LABELS.map(({ key, label, inverted }) => {
-                const raw = scan.conditions[key] as number;
-                const pct = raw * 100;
-                const bad = inverted ? raw > 0.6 : raw < 0.4;
+            <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
+              {scan.conditionFields.map((f) => {
+                const pct = f.value * 100;
+                const bad = f.inverted ? f.value > 0.6 : f.value < 0.4;
+                const source = SOURCES[f.sourceId];
                 return (
-                  <div key={key}>
-                    <div className="mb-1 flex items-baseline justify-between">
-                      <span className="text-xs text-[var(--muted)]">{label}</span>
+                  <div key={f.key} title={f.basis}>
+                    <div className="mb-1 flex items-baseline justify-between gap-2">
+                      <span className="text-xs text-[var(--muted)]">
+                        {f.label}
+                      </span>
                       <span className="font-mono text-xs tabular-nums text-[var(--muted)]">
                         {pct.toFixed(0)}%
                       </span>
@@ -314,6 +381,38 @@ export default function Home() {
                           background: bad ? "var(--danger)" : "var(--positive)",
                         }}
                       />
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <span
+                        className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+                        style={{
+                          background:
+                            f.provenance === "measured"
+                              ? "color-mix(in srgb, var(--positive) 14%, transparent)"
+                              : f.provenance === "researched"
+                                ? "color-mix(in srgb, var(--accent) 14%, transparent)"
+                                : "color-mix(in srgb, var(--warning) 14%, transparent)",
+                          color:
+                            f.provenance === "measured"
+                              ? "var(--positive)"
+                              : f.provenance === "researched"
+                                ? "var(--accent)"
+                                : "var(--warning)",
+                        }}
+                      >
+                        {f.provenance}
+                        {f.period ? ` ${f.period}` : ""}
+                      </span>
+                      {source && (
+                        <a
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="text-[10px] text-[var(--muted)] hover:text-[var(--accent)] hover:underline"
+                        >
+                          {source.publisher}
+                        </a>
+                      )}
                     </div>
                   </div>
                 );
@@ -331,6 +430,10 @@ export default function Home() {
               </ul>
             )}
           </section>
+
+          <div className="mt-4">
+            <SourcesPanel />
+          </div>
 
           <footer className="mt-6 text-xs text-[var(--muted)]">
             Scanned in {(scan.elapsedMs / 1000).toFixed(1)}s ·{" "}

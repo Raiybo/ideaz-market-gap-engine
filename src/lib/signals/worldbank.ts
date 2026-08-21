@@ -37,6 +37,12 @@ export const INDICATORS: Record<string, { key: string; unit: string; label: stri
   "FX.OWN.TOTL.ZS": { key: "accountOwnership", unit: "% aged 15+", label: "Financial account ownership" },
   "BX.TRF.PWKR.DT.GD.ZS": { key: "remittances", unit: "% of GDP", label: "Personal remittances received" },
   "SP.DYN.TFRT.IN": { key: "fertility", unit: "births per woman", label: "Fertility rate" },
+  // Added to derive operating conditions from measurement rather than
+  // judgement wherever the data supports it. See domain/conditions.ts for
+  // which dimensions this actually makes possible and which it does not.
+  "PA.NUS.FCRF": { key: "exchangeRate", unit: "LCU per USD", label: "Official exchange rate" },
+  "FS.AST.PRVT.GD.ZS": { key: "privateCredit", unit: "% of GDP", label: "Domestic credit to private sector" },
+  "EG.ELC.ACCS.ZS": { key: "electricityAccess", unit: "% of population", label: "Access to electricity" },
 };
 
 interface WBObservation {
