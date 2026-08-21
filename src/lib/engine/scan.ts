@@ -23,6 +23,7 @@ import {
   fetchProductGaps,
   fetchTradeFlows,
   REPORTER_CODES,
+  summariseGap,
   type ProductGap,
   type TradeData,
 } from "../signals/comtrade";
@@ -137,6 +138,59 @@ export interface ScanOptions {
   drillSegments?: string[];
 }
 
+/**
+ * Sector-level addressable value, without double counting.
+ *
+ * Segments inside a sector routinely claim overlapping customs codes — apparel
+ * manufacturing and apparel brands both declare chapters 61 and 62, and food
+ * processing declares chapter 19 while bakery declares 1905 beneath it. Summing
+ * each segment's own figure therefore counts the same trade more than once, and
+ * did: Textiles read roughly double its true total.
+ *
+ * The fix is to reduce the sector's codes to a non-overlapping set, value each
+ * one once at the most optimistic substitutability any claiming segment gives
+ * it, and add the modelled segments separately — those have no customs
+ * footprint, so they cannot overlap with anything.
+ */
+function sectorAddressable(
+  sector: Sector,
+  trade: TradeData,
+  opportunities: Opportunity[],
+): number {
+  const declared = new Set<string>();
+  for (const segment of sector.segments) {
+    for (const code of segment.hsCodes) declared.add(code);
+  }
+
+  // Shortest first, so a broader chapter absorbs the lines beneath it.
+  const sorted = Array.from(declared).sort((a, b) => a.length - b.length);
+  const distinct: string[] = [];
+  for (const code of sorted) {
+    if (!distinct.some((kept) => code.startsWith(kept))) distinct.push(code);
+  }
+
+  let total = 0;
+  for (const code of distinct) {
+    const gap = summariseGap(trade, [code]);
+    if (!gap.observed || gap.netImports <= 0) continue;
+    const claimants = sector.segments.filter((segment) =>
+      segment.hsCodes.some((c) => code.startsWith(c) || c.startsWith(code)),
+    );
+    const substitutability = claimants.reduce(
+      (max, segment) => Math.max(max, segment.importSubstitutability),
+      0,
+    );
+    total += gap.netImports * substitutability;
+  }
+
+  // Segments with no customs footprint are additive by construction.
+  for (const opportunity of opportunities) {
+    if (!opportunity.tradeGap?.observed) total += opportunity.addressableUsd ?? 0;
+  }
+
+  return total;
+}
+
 export async function scanCountry(
   iso3: string,
   options: ScanOptions = {},
@@ -222,7 +276,7 @@ export async function scanCountry(
     });
 
     let bestScore = 0;
-    let addressable = 0;
+    const sectorOpportunities: Opportunity[] = [];
 
     for (const segment of sector.segments) {
       const segmentNodeId = `segment:${segment.id}`;
@@ -256,7 +310,7 @@ export async function scanCountry(
       findings.push({ ...opportunity, playbook, beachhead: null });
 
       bestScore = Math.max(bestScore, opportunity.score);
-      addressable += opportunity.addressableUsd ?? 0;
+      sectorOpportunities.push(opportunity);
 
       tracer.status(segmentNodeId, opportunity.tradeGap?.observed ? "ok" : "empty", {
         weight: opportunity.score,
@@ -267,6 +321,8 @@ export async function scanCountry(
         }`,
       });
     }
+
+    const addressable = sectorAddressable(sector, trade, sectorOpportunities);
 
     rollups.push({
       id: sector.id,
