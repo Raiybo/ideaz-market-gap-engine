@@ -12,7 +12,12 @@ import {
   detectRouteIntent,
   matchSegments,
 } from "@/lib/ideas/match";
+import {
+  semanticMatch,
+  semanticMatchingAvailable,
+} from "@/lib/ideas/semantic";
 import { buildVerdict, type IdeaVerdict } from "@/lib/ideas/verdict";
+import { ALL_SEGMENTS } from "@/lib/domain/sectors";
 import type { Finding } from "@/lib/engine/scan";
 import type { SegmentMatch } from "@/lib/ideas/match";
 
@@ -28,8 +33,14 @@ import type { SegmentMatch } from "@/lib/ideas/match";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+export type MatchMode = "semantic" | "lexical";
+
 export interface ValidateResult {
   document: { name: string; pages: number; characters: number };
+  /** How the document was matched, so a weaker mode is never silent. */
+  matchMode: MatchMode;
+  /** The engine's own restatement of the idea, when semantic matching ran. */
+  restatement: string | null;
   country: { iso3: string; name: string; detected: boolean };
   match: SegmentMatch;
   alternatives: SegmentMatch[];
@@ -101,35 +112,84 @@ export async function POST(request: Request) {
         );
 
         // ---- Locate -------------------------------------------------------
+        // Classification runs before the market is fixed, because it reads the
+        // market too — and reads it better than a name scan can. "Lebanon" in a
+        // deck about dairy is a country; in a deck about a county fair it is
+        // Pennsylvania, and only the surrounding sentences separate the two.
         tracer.phase("Locating the idea in the taxonomy");
-        const countryMatches = detectCountry(doc.text);
-        const { country: iso3, detected } = countryFromMatches(
-          countryMatches,
-          fallback,
-        );
-        const country = COUNTRY_BY_ISO3.get(iso3) ?? fallback;
-
-        const countryNodeId = `country:${country.iso3}`;
-        tracer.node({
-          id: countryNodeId,
-          kind: "country",
-          label: country.name,
-          detail: detected
-            ? `Named in the document ${countryMatches[0].mentions} times`
-            : `Not clearly named in the document — using the selected market`,
-          status: "active",
-        });
 
         tracer.node({
           id: "doc:file",
           kind: "source",
           label: file.name.replace(/\.pdf$/i, "").slice(0, 40),
-          parent: countryNodeId,
           detail: `${doc.pages} pages · ${doc.length.toLocaleString()} characters extracted`,
           status: "ok",
         });
 
-        const matches = matchSegments(doc.text, 5);
+        // Semantic matching where a key is configured, lexical otherwise. The
+        // lexical matcher leans on customs vocabulary, which fails on documents
+        // that describe a business in its own words rather than the tariff
+        // schedule's — so the stronger path is tried first and the mode is
+        // always reported rather than degrading silently.
+        tracer.node({
+          id: "match:engine",
+          kind: "source",
+          label: semanticMatchingAvailable()
+            ? "Reading the idea (Claude)"
+            : "Matching by vocabulary",
+          parent: "doc:file",
+          detail: semanticMatchingAvailable()
+            ? "Classifying the document against 73 segments"
+            : "Lexical match against segment and customs vocabulary",
+          status: "active",
+        });
+
+        const semantic = await semanticMatch(doc.text);
+        let matchMode: MatchMode = semantic ? "semantic" : "lexical";
+        let matches: SegmentMatch[];
+        let intent = detectRouteIntent(doc.text);
+
+        if (semantic) {
+          const byId = new Map(
+            ALL_SEGMENTS.map((entry) => [entry.segment.id, entry]),
+          );
+          matches = semantic.matches
+            .map((m) => {
+              const found = byId.get(m.segmentId);
+              if (!found) return null;
+              return {
+                segmentId: m.segmentId,
+                sectorId: found.sector.id,
+                name: found.segment.name,
+                sectorName: found.sector.name,
+                score: m.confidence,
+                confidence: m.confidence,
+                evidence: [m.reasoning],
+              } satisfies SegmentMatch;
+            })
+            .filter((m): m is SegmentMatch => m !== null);
+
+          if (semantic.route) {
+            intent = { route: semantic.route, matched: semantic.routeEvidence };
+          }
+          tracer.status("match:engine", "ok", {
+            detail: semantic.restatement || "Document classified",
+          });
+        } else {
+          matches = matchSegments(doc.text, 5);
+          tracer.status("match:engine", semanticMatchingAvailable() ? "error" : "empty", {
+            detail: semanticMatchingAvailable()
+              ? "Claude classification failed; fell back to vocabulary matching"
+              : "No ANTHROPIC_API_KEY set — vocabulary matching only",
+          });
+        }
+
+        if (matches.length === 0) {
+          // Semantic matching can return only ids the taxonomy rejects; the
+          // lexical matcher is the floor rather than an error.
+          matches = matchSegments(doc.text, 5);
+          matchMode = "lexical";
+        }
         if (matches.length === 0) {
           throw new ExtractionError(
             "Nothing in the document matched the segment taxonomy. It may describe a business this system does not model, or the text may be too sparse to match on.",
@@ -141,18 +201,41 @@ export async function POST(request: Request) {
             id: `match:${m.segmentId}`,
             kind: "finding",
             label: m.name,
-            parent: "doc:file",
-            detail: `${i === 0 ? "Best match" : `Alternative ${i}`} · ${(m.confidence * 100).toFixed(0)}% · matched on ${m.evidence.slice(0, 4).join(", ")}`,
+            parent: "match:engine",
+            detail: `${i === 0 ? "Best match" : `Alternative ${i}`} · ${(m.confidence * 100).toFixed(0)}% · ${m.evidence.slice(0, 4).join(", ")}`,
             status: i === 0 ? "ok" : "empty",
           });
         });
 
-        const intent = detectRouteIntent(doc.text);
         if (intent.route) {
           tracer.note(
             `Document proposes an entry route: ${intent.route}${intent.matched ? ` ("${intent.matched.trim()}")` : ""}`,
           );
         }
+
+        // ---- Market -------------------------------------------------------
+        const countryMatches = detectCountry(doc.text);
+        const lexical = countryFromMatches(countryMatches, fallback);
+        const semanticCountry = semantic?.countryIso3
+          ? COUNTRY_BY_ISO3.get(semantic.countryIso3)
+          : undefined;
+        const country =
+          semanticCountry ?? COUNTRY_BY_ISO3.get(lexical.country) ?? fallback;
+        const detected = Boolean(semanticCountry) || lexical.detected;
+
+        const countryNodeId = `country:${country.iso3}`;
+        tracer.node({
+          id: countryNodeId,
+          kind: "country",
+          label: country.name,
+          detail: semanticCountry
+            ? semantic?.countryReasoning || "Read from the document"
+            : lexical.detected
+              ? `Named in the document ${countryMatches[0].mentions} times`
+              : "Not clearly named in the document — using the selected market",
+          status: "active",
+        });
+        tracer.edge(countryNodeId, "doc:file");
 
         // ---- Assess -------------------------------------------------------
         // The whole country is scanned rather than just the matched sector,
@@ -196,6 +279,8 @@ export async function POST(request: Request) {
             pages: doc.pages,
             characters: doc.length,
           },
+          matchMode,
+          restatement: semantic?.restatement ?? null,
           country: { iso3: country.iso3, name: country.name, detected },
           match: best,
           alternatives: matches.slice(1),

@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import type { Finding } from "@/lib/engine/scan";
 import type { Opportunity } from "@/lib/engine/score";
+import { toggleWatch, useIsWatched } from "@/lib/watchlist";
 
 function formatUsd(value: number): string {
   if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
@@ -77,6 +78,21 @@ interface ProductGap {
   importDependency: number;
 }
 
+interface NewsArticle {
+  title: string;
+  url: string;
+  domain: string;
+  seenAt: string;
+}
+
+interface NewsState {
+  status: "idle" | "loading" | "done" | "error";
+  articles?: NewsArticle[];
+  capacity?: NewsArticle[];
+  message?: string;
+  signal?: string;
+}
+
 interface ProductState {
   status: "idle" | "loading" | "done" | "error";
   products?: ProductGap[];
@@ -108,7 +124,33 @@ export function FindingCard({
 }) {
   const [open, setOpen] = useState(false);
   const [products, setProducts] = useState<ProductState>({ status: "idle" });
+  const [news, setNews] = useState<NewsState>({ status: "idle" });
   const o = finding;
+  const watched = useIsWatched(country, o.segmentId);
+
+  async function loadNews() {
+    if (news.status === "loading") return;
+    setNews({ status: "loading" });
+    try {
+      const res = await fetch(
+        `/api/news?country=${country}&segment=${o.segmentId}`,
+      );
+      const body = await res.json();
+      if (!res.ok) {
+        setNews({ status: "error", message: body.error ?? "Lookup failed" });
+        return;
+      }
+      setNews({
+        status: "done",
+        articles: body.articles ?? [],
+        capacity: body.capacity ?? [],
+        message: body.message ?? "",
+        signal: body.status,
+      });
+    } catch {
+      setNews({ status: "error", message: "News lookup failed." });
+    }
+  }
   const play = finding.playbook;
   const tone = ROUTE_TONE[play.route] ?? "var(--accent)";
   const observed = Boolean(o.tradeGap?.observed);
@@ -153,13 +195,41 @@ export function FindingCard({
                 </span>
               )}
             </div>
-            <div className="flex items-baseline gap-1.5">
-              <span
-                className={`font-mono text-2xl font-semibold tabular-nums ${scoreTone(o.score)}`}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() =>
+                  toggleWatch({
+                    segmentId: o.segmentId,
+                    countryIso3: country,
+                    countryName: country,
+                    segmentName: o.name,
+                    sectorName: o.sectorName,
+                    score: o.score,
+                    addressableUsd: o.addressableUsd,
+                  })
+                }
+                title={
+                  watched
+                    ? "Saved — the score at save time is kept so later scans can show the movement"
+                    : "Save this finding and track how its score moves"
+                }
+                className={`rounded-md px-1.5 py-0.5 text-sm transition-colors ${
+                  watched
+                    ? "text-[var(--warning)]"
+                    : "text-[var(--muted)] hover:text-[var(--foreground)]"
+                }`}
+                aria-pressed={watched}
               >
-                {o.score.toFixed(1)}
-              </span>
-              <span className="text-xs text-[var(--muted)]">/100</span>
+                {watched ? "★" : "☆"}
+              </button>
+              <div className="flex items-baseline gap-1.5">
+                <span
+                  className={`font-mono text-2xl font-semibold tabular-nums ${scoreTone(o.score)}`}
+                >
+                  {o.score.toFixed(1)}
+                </span>
+                <span className="text-xs text-[var(--muted)]">/100</span>
+              </div>
             </div>
           </div>
 
@@ -334,7 +404,71 @@ export function FindingCard({
                 : "Break down by product →"}
           </button>
         )}
+
+        <button
+          onClick={loadNews}
+          disabled={news.status === "loading"}
+          className="text-xs font-medium text-[var(--accent)] hover:underline disabled:opacity-50"
+          title="Search news published in this country for signs that someone is already building capacity here"
+        >
+          {news.status === "loading"
+            ? "Searching recent news…"
+            : news.status === "done"
+              ? `News checked — ${news.capacity?.length ?? 0} capacity signals`
+              : "Check recent news →"}
+        </button>
       </div>
+
+      {news.status === "error" && (
+        <p className="mt-2 text-xs text-[var(--danger)]">{news.message}</p>
+      )}
+
+      {news.status === "done" && (
+        <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3">
+          <p className="text-xs text-[var(--muted)]">{news.message}</p>
+          {(news.capacity?.length ?? 0) > 0 && (
+            <div className="mt-2.5">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--danger)]">
+                Reads as new capacity being built
+              </p>
+              <ul className="space-y-1.5">
+                {news.capacity!.slice(0, 5).map((a) => (
+                  <li key={a.url} className="text-sm">
+                    <a
+                      href={a.url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-[var(--accent)] hover:underline"
+                    >
+                      {a.title}
+                    </a>
+                    <span className="ml-2 font-mono text-[10px] text-[var(--muted)]">
+                      {a.domain} · {a.seenAt.slice(0, 10)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(news.articles?.length ?? 0) > 0 &&
+            (news.capacity?.length ?? 0) === 0 && (
+              <ul className="mt-2 space-y-1">
+                {news.articles!.slice(0, 4).map((a) => (
+                  <li key={a.url} className="truncate text-sm">
+                    <a
+                      href={a.url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-[var(--muted)] hover:text-[var(--accent)] hover:underline"
+                    >
+                      {a.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            )}
+        </div>
+      )}
 
       {products.status === "error" && (
         <p className="mt-2 text-xs text-[var(--danger)]">{products.message}</p>

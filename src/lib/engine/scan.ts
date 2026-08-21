@@ -124,6 +124,12 @@ export interface CountryScan {
 /** How many top findings get a product-level beachhead fetched. */
 const DRILL_DOWN_TOP_N = 3;
 
+/**
+ * How long the scan will wait for premise counts before proceeding without
+ * them. Sized to leave room for Comtrade inside a 60-second function budget.
+ */
+const DENSITY_DEADLINE_MS = 22000;
+
 export interface ScanOptions {
   /** Restrict to one sector. Omit to scan the whole country. */
   sectorId?: string;
@@ -234,19 +240,49 @@ export async function scanCountry(
   const segmentIds = sectors.flatMap((s) => s.segments.map((seg) => seg.id));
 
   tracer.phase("Measuring what crosses the border");
+
+  /**
+   * Overpass serves about two requests at a time, so measuring 32 segments
+   * costs roughly a minute on a country nobody has scanned before — past the
+   * ceiling a serverless function gets. The premise counts are cached for
+   * thirty days once fetched, so the honest arrangement is to bound the cold
+   * case and let the warm one be complete: skip density rather than fail the
+   * scan, say so, and pick it up on the next run.
+   */
+  const withDeadline = <T,>(work: Promise<T>, ms: number, fallback: T) =>
+    Promise.race([
+      work,
+      new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+    ]);
+
   const [trade, density] = await Promise.all([
     hsCodes.length > 0
       ? fetchTradeFlows(iso3, hsCodes, currentYear, bundle, tracer)
       : Promise.resolve<TradeData>(EMPTY_TRADE_DATA),
-    fetchDensity(
-      country.iso2,
-      segmentIds,
-      population,
-      bundle,
-      tracer,
-      countryNodeId,
-    ).catch(() => EMPTY_DENSITY),
+    withDeadline(
+      fetchDensity(
+        country.iso2,
+        segmentIds,
+        population,
+        bundle,
+        tracer,
+        countryNodeId,
+      ).catch(() => EMPTY_DENSITY),
+      DENSITY_DEADLINE_MS,
+      EMPTY_DENSITY,
+    ),
   ]);
+
+  if (!density.available && segmentIds.length > 1) {
+    // The node was left mid-flight when the deadline fired; leaving it blue
+    // would read as "still working" long after the scan finished.
+    tracer.status("src:osm", "empty", {
+      detail: "Skipped — not ready inside the scan's budget",
+    });
+    bundle.warnings.push(
+      "Observed competition density was not ready in time for this scan, so headroom is estimated from trade balances alone. OpenStreetMap counts are cached once fetched — re-run to pick them up.",
+    );
+  }
 
   // ---- Scoring ------------------------------------------------------------
   tracer.phase("Scoring every segment");

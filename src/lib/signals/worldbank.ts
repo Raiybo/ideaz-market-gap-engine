@@ -63,14 +63,23 @@ function confidenceForAge(year: number, now: number): number {
   return 0.25;
 }
 
+/**
+ * Per-indicator timeout.
+ *
+ * These are fetched concurrently, and a single shared AbortController means one
+ * slow indicator aborts all of them — which is exactly how a healthy country
+ * comes back reporting "26 of 26 indicators did not return data". Each request
+ * gets its own deadline so a straggler costs one indicator, not the set.
+ */
+const INDICATOR_TIMEOUT_MS = 20000;
+
 async function fetchIndicator(
   iso3: string,
   indicator: string,
-  signal: AbortSignal,
 ): Promise<WBObservation[] | null> {
   const url = `${WB_BASE}/country/${iso3}/indicator/${indicator}?format=json&per_page=40&date=2005:2025`;
   const res = await fetch(url, {
-    signal,
+    signal: AbortSignal.timeout(INDICATOR_TIMEOUT_MS),
     // Macro indicators update at most a few times a year; a day of cache is
     // generous and keeps the page fast without going stale in any real sense.
     next: { revalidate: 86400 },
@@ -113,8 +122,6 @@ export async function fetchWorldBank(
   tracer: Tracer = NULL_TRACER,
 ): Promise<SignalBundle> {
   const bundle = makeBundle(iso3);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
 
   tracer.node({
     id: "src:worldbank",
@@ -138,7 +145,7 @@ export async function fetchWorldBank(
     }
 
     const results = await Promise.allSettled(
-      codes.map((code) => fetchIndicator(iso3, code, controller.signal)),
+      codes.map((code) => fetchIndicator(iso3, code)),
     );
 
     let failures = 0;
@@ -211,8 +218,6 @@ export async function fetchWorldBank(
       `World Bank API unreachable (${err instanceof Error ? err.message : "unknown error"}). Scores fall back to modelled estimates.`,
     );
     tracer.status("src:worldbank", "error", { detail: "API unreachable" });
-  } finally {
-    clearTimeout(timeout);
   }
 
   return bundle;

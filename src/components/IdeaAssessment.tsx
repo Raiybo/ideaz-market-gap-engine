@@ -139,7 +139,15 @@ export function IdeaAssessment({
   assessment: ValidateResult;
   onPickAlternative: (segmentId: string) => void;
 }) {
-  const { verdict, alternatives, finding, country, document: doc } = assessment;
+  const {
+    verdict,
+    alternatives,
+    finding,
+    country,
+    document: doc,
+    matchMode,
+    restatement,
+  } = assessment;
   const style = STANDING_STYLE[verdict.standing];
 
   return (
@@ -290,6 +298,37 @@ export function IdeaAssessment({
 
       {/* Match transparency */}
       <section className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span
+            className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+            style={{
+              background:
+                matchMode === "semantic"
+                  ? "color-mix(in srgb, var(--positive) 14%, transparent)"
+                  : "color-mix(in srgb, var(--warning) 14%, transparent)",
+              color:
+                matchMode === "semantic"
+                  ? "var(--positive)"
+                  : "var(--warning)",
+            }}
+          >
+            {matchMode === "semantic" ? "read by Claude" : "vocabulary match"}
+          </span>
+          {matchMode === "lexical" && (
+            <span className="text-xs text-[var(--muted)]">
+              Matching compares words, not meaning — a document that describes
+              its business without using the category&apos;s usual nouns can be
+              matched to the wrong segment. Set ANTHROPIC_API_KEY to enable
+              semantic reading.
+            </span>
+          )}
+        </div>
+        {restatement && (
+          <p className="mb-2 text-sm">
+            <span className="text-[var(--muted)]">Read as: </span>
+            {restatement}
+          </p>
+        )}
         <p className="text-xs text-[var(--muted)]">{verdict.matchNote}</p>
         {alternatives.length > 0 && (
           <div className="mt-2.5 flex flex-wrap items-center gap-2">

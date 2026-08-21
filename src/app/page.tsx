@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Suspense, useCallback, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import { FindingCard } from "@/components/FindingCard";
 import {
@@ -13,6 +14,7 @@ import { COUNTRIES, DEFAULT_COUNTRY } from "@/lib/domain/countries";
 import { SECTORS } from "@/lib/domain/sectors";
 import { SOURCES } from "@/lib/domain/sources";
 import { useScanStream, useValidateStream } from "@/lib/useScanStream";
+import { deltasFor, useWatchlist } from "@/lib/watchlist";
 
 /** Findings shown before the list has to be asked for in full. */
 const VISIBLE_FINDINGS = 12;
@@ -26,13 +28,86 @@ function formatUsd(value: number): string {
 
 type Mode = "find" | "test";
 
-export default function Home() {
-  const [country, setCountry] = useState(DEFAULT_COUNTRY);
-  const [scope, setScope] = useState("all");
+/**
+ * The page reads its opening state from the URL and writes every change back,
+ * so a scan is a link. Without it, "look at Lebanon's dairy gap" is four clicks
+ * of instructions instead of a URL — and the result is reproducible, because
+ * the underlying data is annual and cached rather than a live feed.
+ */
+export default function Page() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto w-full max-w-6xl px-4 py-8 text-sm text-[var(--muted)]">
+          Loading…
+        </div>
+      }
+    >
+      <Home />
+    </Suspense>
+  );
+}
+
+function Home() {
+  const params = useSearchParams();
+  const [country, setCountry] = useState(
+    () => params.get("country") ?? DEFAULT_COUNTRY,
+  );
+  const [scope, setScope] = useState(() => params.get("sector") ?? "all");
   const [showAll, setShowAll] = useState(false);
   const [graphOpen, setGraphOpen] = useState(true);
-  const [mode, setMode] = useState<Mode>("find");
+  const [mode, setMode] = useState<Mode>(() =>
+    params.get("mode") === "test" ? "test" : "find",
+  );
   const [file, setFile] = useState<File | null>(null);
+  const watchlist = useWatchlist();
+
+  // replaceState rather than router.push: this is the same view with different
+  // inputs, and it should not stack a history entry per click.
+  const syncUrl = useCallback(
+    (next: { country?: string; sector?: string; mode?: Mode }) => {
+      if (typeof window === "undefined") return;
+      const url = new URL(window.location.href);
+      const set = (key: string, value: string | undefined, fallback: string) => {
+        if (value === undefined) return;
+        if (value === fallback) url.searchParams.delete(key);
+        else url.searchParams.set(key, value);
+      };
+      set("country", next.country, DEFAULT_COUNTRY);
+      set("sector", next.sector, "all");
+      set("mode", next.mode, "find");
+      window.history.replaceState(null, "", url);
+    },
+    [],
+  );
+
+  const pickCountry = useCallback(
+    (iso3: string) => {
+      setCountry(iso3);
+      setShowAll(false);
+      setGraphOpen(true);
+      syncUrl({ country: iso3 });
+    },
+    [syncUrl],
+  );
+
+  const pickScope = useCallback(
+    (id: string) => {
+      setScope(id);
+      setShowAll(false);
+      setGraphOpen(true);
+      syncUrl({ sector: id });
+    },
+    [syncUrl],
+  );
+
+  const pickMode = useCallback(
+    (next: Mode) => {
+      setMode(next);
+      syncUrl({ mode: next });
+    },
+    [syncUrl],
+  );
 
   const scanStream = useScanStream(country, scope, mode === "find");
   const idea = useValidateStream();
@@ -80,11 +155,7 @@ export default function Home() {
               </span>
               <select
                 value={country}
-                onChange={(e) => {
-                  setCountry(e.target.value);
-                  setShowAll(false);
-                  setGraphOpen(true);
-                }}
+                onChange={(e) => pickCountry(e.target.value)}
                 className="min-w-56 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
               >
                 {grouped.map(([region, list]) => (
@@ -123,7 +194,7 @@ export default function Home() {
         ).map(([id, label, hint]) => (
           <button
             key={id}
-            onClick={() => setMode(id)}
+            onClick={() => pickMode(id)}
             title={hint}
             className={`rounded-lg border px-4 py-2 text-sm transition-colors ${
               mode === id
@@ -167,11 +238,7 @@ export default function Home() {
         ].map((s) => (
           <button
             key={s.id}
-            onClick={() => {
-              setScope(s.id);
-              setShowAll(false);
-              setGraphOpen(true);
-            }}
+            onClick={() => pickScope(s.id)}
             className={`shrink-0 rounded-lg border px-3 py-2 text-sm transition-colors ${
               s.id === scope
                 ? "border-[var(--accent)] bg-[var(--accent)]/10 font-medium text-[var(--accent)]"
@@ -219,9 +286,8 @@ export default function Home() {
         <IdeaAssessment
           assessment={idea.assessment}
           onPickAlternative={(sectorId) => {
-            setMode("find");
-            setScope(sectorId);
-            setGraphOpen(true);
+            pickMode("find");
+            pickScope(sectorId);
           }}
         />
       )}
@@ -273,10 +339,7 @@ export default function Home() {
                 {scan.sectors.slice(0, 8).map((s) => (
                   <button
                     key={s.id}
-                    onClick={() => {
-                      setScope(s.id);
-                      setGraphOpen(true);
-                    }}
+                    onClick={() => pickScope(s.id)}
                     className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition-colors hover:border-[var(--accent)]"
                   >
                     <p className="truncate text-xs text-[var(--muted)]">
@@ -294,6 +357,62 @@ export default function Home() {
                   </button>
                 ))}
               </div>
+            </section>
+          )}
+
+          {/* Saved findings. The score shown against each is the score at the
+              moment it was saved, so the delta is the market moving rather
+              than the engine being re-run. */}
+          {watchlist.length > 0 && (
+            <section className="mb-6 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
+                Saved · {watchlist.length}
+              </h2>
+              <ul className="space-y-1.5">
+                {deltasFor(scan.findings, scan.country.iso3)
+                  .slice(0, 8)
+                  .map((d) => (
+                    <li
+                      key={`${d.entry.countryIso3}:${d.entry.segmentId}`}
+                      className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm"
+                    >
+                      <button
+                        onClick={() => pickCountry(d.entry.countryIso3)}
+                        className="text-[var(--accent)] hover:underline"
+                      >
+                        {d.entry.segmentName}
+                      </button>
+                      <span className="text-xs text-[var(--muted)]">
+                        {d.entry.countryIso3} · {d.entry.sectorName}
+                      </span>
+                      <span className="font-mono text-xs tabular-nums text-[var(--muted)]">
+                        saved at {d.entry.score.toFixed(1)}
+                      </span>
+                      {d.scoreChange === null ? (
+                        <span className="text-xs text-[var(--muted)] opacity-70">
+                          not in this scan
+                        </span>
+                      ) : (
+                        <span
+                          className="font-mono text-xs tabular-nums"
+                          style={{
+                            color:
+                              d.scoreChange > 0.05
+                                ? "var(--positive)"
+                                : d.scoreChange < -0.05
+                                  ? "var(--danger)"
+                                  : "var(--muted)",
+                          }}
+                          title={`${d.daysHeld} day${d.daysHeld === 1 ? "" : "s"} since saved`}
+                        >
+                          {d.scoreChange > 0 ? "+" : ""}
+                          {d.scoreChange.toFixed(1)}
+                          {d.daysHeld > 0 ? ` over ${d.daysHeld}d` : " today"}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+              </ul>
             </section>
           )}
 

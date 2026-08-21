@@ -20,12 +20,32 @@
 import { NULL_TRACER, type Tracer } from "../engine/trace";
 import { put, type SignalBundle } from "./types";
 
-const OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter";
+/**
+ * Overpass mirrors, tried in order.
+ *
+ * These are volunteer-run instances and any one of them can be down, overloaded
+ * or refusing a busy client at any moment — during development the main
+ * instance stopped answering entirely for a stretch. Falling through to a
+ * mirror turns a total loss of the competition signal into a slower one.
+ */
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+];
 
 /**
- * The commercial universe used as the denominator. Deliberately excludes
- * non-commercial amenities (benches, waste baskets, parking) which would swamp
- * the count and vary wildly with local mapping fashion.
+ * The denominator: a stable, broadly-mapped slice of commercial activity used
+ * to normalise for how completely a country is mapped at all.
+ *
+ * It is a completeness yardstick, not a strict superset of the numerators.
+ * Several segments are counted from tags outside it — hotels are `tourism`,
+ * estate agents and lawyers are `office`, trades are `craft` — so a segment's
+ * "share" is a ratio against that yardstick rather than a literal share of it.
+ * That is what the measure needs to be: both numerator and denominator scale
+ * with local mapping effort, so the effort cancels and two countries become
+ * comparable. Deliberately excludes non-commercial amenities (benches, waste
+ * baskets, parking) which would swamp the count and swing with mapping fashion.
  */
 const DENOMINATOR_AMENITIES =
   "restaurant|fast_food|cafe|bar|pub|pharmacy|clinic|doctors|dentist|bank|fuel|car_wash|school|kindergarten|marketplace|veterinary";
@@ -104,9 +124,11 @@ const DENSITY_RULES: DensityRule[] = [
   },
   {
     segmentId: "tex-brands",
-    selector: `["shop"~"^(clothes|boutique|shoes)$"]`,
-    referenceShare: 0.055,
-    label: "clothing and footwear retail",
+    // Footwear moved to tex-leather so the two segments are not both scored
+    // off the same premises.
+    selector: `["shop"~"^(clothes|boutique|fashion_accessories)$"]`,
+    referenceShare: 0.045,
+    label: "clothing retail",
   },
   {
     segmentId: "re-rental-management",
@@ -119,6 +141,133 @@ const DENSITY_RULES: DensityRule[] = [
     selector: `["shop"~"^(energy|solar)$"]`,
     referenceShare: 0.004,
     label: "energy and solar suppliers",
+  },
+
+  // ---- Second tranche -----------------------------------------------------
+  // Segments whose businesses are also genuinely visible as mapped premises.
+  // The bar is the same: a tag that mappers actually use for this activity,
+  // not a tag that could loosely be argued to cover it. Segments still absent
+  // (software, most manufacturing, wholesale-by-office) have no reliable OSM
+  // footprint and get no signal rather than a fabricated one.
+  {
+    segmentId: "fnb-beverage",
+    selector: `["shop"~"^(beverages|alcohol|wine)$"]`,
+    referenceShare: 0.018,
+    label: "drinks retailers",
+  },
+  {
+    segmentId: "agri-inputs",
+    selector: `["shop"~"^(agrarian|garden_centre|farm)$"]`,
+    referenceShare: 0.006,
+    label: "agricultural supply and garden stores",
+  },
+  {
+    segmentId: "mfg-buildingmaterials",
+    selector: `["shop"~"^(doityourself|hardware|paint|building_materials)$"]`,
+    referenceShare: 0.02,
+    label: "building material and hardware suppliers",
+  },
+  {
+    segmentId: "retail-b2b-distribution",
+    selector: `["shop"~"^(wholesale|trade)$"]`,
+    referenceShare: 0.008,
+    label: "wholesalers and trade counters",
+  },
+  {
+    segmentId: "retail-resale",
+    selector: `["shop"~"^(second_hand|charity|antiques)$"]`,
+    referenceShare: 0.008,
+    label: "second-hand and resale shops",
+  },
+  {
+    segmentId: "health-medtech-distribution",
+    selector: `["shop"~"^(medical_supply|optician|hearing_aids)$"]`,
+    referenceShare: 0.012,
+    label: "medical supply, optician and hearing outlets",
+  },
+  {
+    segmentId: "health-eldercare",
+    selector: `["amenity"="social_facility"]["social_facility"~"^(nursing_home|assisted_living|group_home)$"]`,
+    referenceShare: 0.004,
+    label: "care homes and assisted living facilities",
+  },
+  {
+    segmentId: "tex-leather",
+    selector: `["shop"~"^(shoes|bag|leather)$"]`,
+    referenceShare: 0.02,
+    label: "footwear and leather goods retail",
+  },
+  {
+    segmentId: "tour-experiences",
+    selector: `["shop"="travel_agency"]`,
+    referenceShare: 0.008,
+    label: "travel agencies and tour operators",
+  },
+  {
+    segmentId: "waste-recycling",
+    selector: `["amenity"="recycling"]["recycling_type"="centre"]`,
+    referenceShare: 0.006,
+    label: "recycling centres",
+  },
+  {
+    segmentId: "waste-collection",
+    selector: `["amenity"~"^(waste_disposal|waste_transfer_station)$"]`,
+    referenceShare: 0.005,
+    label: "waste transfer and disposal sites",
+  },
+  {
+    segmentId: "mob-ev",
+    selector: `["amenity"="charging_station"]`,
+    referenceShare: 0.01,
+    label: "EV charging points",
+  },
+  {
+    segmentId: "mob-shared",
+    selector: `["amenity"~"^(bicycle_rental|car_sharing|motorcycle_rental)$"]`,
+    referenceShare: 0.005,
+    label: "shared bike, scooter and car points",
+  },
+  {
+    segmentId: "fin-insurance",
+    selector: `["office"="insurance"]`,
+    referenceShare: 0.01,
+    label: "insurance offices",
+  },
+  {
+    segmentId: "svc-legal-advisory",
+    selector: `["office"="lawyer"]`,
+    referenceShare: 0.014,
+    label: "law practices",
+  },
+  {
+    segmentId: "svc-accounting-compliance",
+    selector: `["office"~"^(accountant|tax_advisor)$"]`,
+    referenceShare: 0.01,
+    label: "accountancy and tax practices",
+  },
+  {
+    segmentId: "svc-marketing",
+    selector: `["office"~"^(advertising_agency|graphic_design)$"]`,
+    referenceShare: 0.005,
+    label: "advertising and design agencies",
+  },
+  {
+    segmentId: "tech-outsourcing",
+    selector: `["office"~"^(it|telecommunication)$"]`,
+    referenceShare: 0.008,
+    label: "IT and telecoms service offices",
+  },
+  {
+    segmentId: "re-contracting",
+    selector: `["craft"~"^(plumber|electrician|carpenter|builder|painter|hvac|roofer)$"]`,
+    referenceShare: 0.012,
+    label: "building trades",
+  },
+  {
+    segmentId: "edu-vocational",
+    selector: `["amenity"="college"]`,
+    referenceShare: 0.005,
+    label: "colleges and vocational institutes",
   },
 ];
 
@@ -147,8 +296,54 @@ export const EMPTY_DENSITY: DensityResult = {
   available: false,
 };
 
+/**
+ * Rules per Overpass request.
+ *
+ * Overpass evaluates the statements in a query sequentially, so one request
+ * carrying all 32 rules takes as long as all 32 counts added together — 74s for
+ * Lebanon, past the 60s ceiling a serverless function gets. Splitting into
+ * parallel requests turns that sum into a maximum. The denominator is repeated
+ * in each chunk, which costs two extra counts per request and buys the ability
+ * to use whichever chunk returns.
+ */
+const RULES_PER_REQUEST = 8;
+
+/**
+ * Overpass runs roughly two slots per client, so firing every chunk at once
+ * does not go faster — it collects 429s and then pays for the retries. Two at
+ * a time matches what the endpoint will actually serve.
+ */
+const MAX_CONCURRENT_REQUESTS = 2;
+
+/** Run tasks with a fixed concurrency ceiling, preserving input order. */
+async function mapWithLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function chunkRules(rules: DensityRule[]): DensityRule[][] {
+  const out: DensityRule[][] = [];
+  for (let i = 0; i < rules.length; i += RULES_PER_REQUEST) {
+    out.push(rules.slice(i, i + RULES_PER_REQUEST));
+  }
+  return out;
+}
+
 function buildQuery(iso2: string, rules: DensityRule[]): string {
-  const head = `[out:json][timeout:60];area["ISO3166-1"="${iso2}"][admin_level=2]->.a;`;
+  const head = `[out:json][timeout:180];area["ISO3166-1"="${iso2}"][admin_level=2]->.a;`;
   const counts = rules
     .map((r) => `nwr${r.selector}(area.a);out count;`)
     .join("");
@@ -178,10 +373,14 @@ async function postWithRetry(
 ): Promise<Response | null> {
   let last: Response | null = null;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await sleep(2500 * attempt);
+  // One attempt per mirror, then one more pass with backoff. A mirror that is
+  // merely busy usually answers on the second pass; one that is down never
+  // will, and the loop moves on rather than spending the whole budget on it.
+  for (let attempt = 0; attempt < OVERPASS_ENDPOINTS.length * 2; attempt++) {
+    const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
+    if (attempt >= OVERPASS_ENDPOINTS.length) await sleep(2000);
     try {
-      const res = await fetch(OVERPASS_ENDPOINT, {
+      const res = await fetch(endpoint, {
         method: "POST",
         // Overpass expects the query as a form field named `data`; posting it
         // as a bare text/plain body is answered with 406.
@@ -245,40 +444,49 @@ export async function fetchDensity(
   });
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+  const timeout = setTimeout(() => controller.abort(), 120000);
 
   try {
-    const res = await postWithRetry(
-      buildQuery(iso2, rules),
-      controller.signal,
+    const chunks = chunkRules(rules);
+    const responses = await mapWithLimit(
+      chunks,
+      MAX_CONCURRENT_REQUESTS,
+      async (chunk) => {
+        const res = await postWithRetry(
+          buildQuery(iso2, chunk),
+          controller.signal,
+        );
+        if (!res || !res.ok) return { chunk, counts: null, status: res?.status };
+        const body = (await res.json()) as { elements?: OverpassCount[] };
+        const counts = (body.elements ?? []).filter((e) => e.type === "count");
+        // chunk.length segment counts, then 2 denominator counts.
+        if (counts.length < chunk.length + 2) {
+          return { chunk, counts: null, status: res.status };
+        }
+        return { chunk, counts, status: res.status };
+      },
     );
 
-    if (!res || !res.ok) {
+    const usable = responses.filter((r) => r.counts !== null);
+    if (usable.length === 0) {
+      const status = responses.find((r) => r.status)?.status;
       bundle.warnings.push(
-        res
-          ? `OpenStreetMap density lookup returned ${res.status}; competition estimates fall back to structural proxies.`
+        status
+          ? `OpenStreetMap density lookup returned ${status}; competition estimates fall back to structural proxies.`
           : "OpenStreetMap was unreachable; competition estimates fall back to structural proxies.",
       );
       tracer.status("src:osm", "error", {
-        detail: res ? `Overpass returned ${res.status}` : "Overpass unreachable",
+        detail: status ? `Overpass returned ${status}` : "Overpass unreachable",
       });
       return EMPTY_DENSITY;
     }
 
-    const body = (await res.json()) as { elements?: OverpassCount[] };
-    const counts = (body.elements ?? []).filter((e) => e.type === "count");
-
-    // rules.length segment counts, then 2 denominator counts.
-    if (counts.length < rules.length + 2) {
-      bundle.warnings.push(
-        "OpenStreetMap returned an incomplete response; competition estimates fall back to structural proxies.",
-      );
-      tracer.status("src:osm", "error", { detail: "Incomplete response" });
-      return EMPTY_DENSITY;
-    }
-
+    // Every chunk measures the same country, so the denominators agree; take
+    // the first that came back rather than re-querying.
+    const first = usable[0];
     const universe =
-      readCount(counts[rules.length]) + readCount(counts[rules.length + 1]);
+      readCount(first.counts![first.chunk.length]) +
+      readCount(first.counts![first.chunk.length + 1]);
 
     if (universe < 500) {
       // Too thinly mapped for composition to mean anything.
@@ -292,20 +500,28 @@ export async function fetchDensity(
     }
 
     const bySegment = new Map<string, SegmentDensity>();
-    rules.forEach((rule, i) => {
-      const count = readCount(counts[i]);
-      const share = count / universe;
-      const perMillion = population > 0 ? count / (population / 1e6) : 0;
-      bySegment.set(rule.segmentId, {
-        segmentId: rule.segmentId,
-        label: rule.label,
-        count,
-        perMillion,
-        share,
-        referenceShare: rule.referenceShare,
-        saturation: rule.referenceShare > 0 ? share / rule.referenceShare : 1,
+    for (const { chunk, counts } of usable) {
+      chunk.forEach((rule, i) => {
+        const count = readCount(counts![i]);
+        const share = count / universe;
+        const perMillion = population > 0 ? count / (population / 1e6) : 0;
+        bySegment.set(rule.segmentId, {
+          segmentId: rule.segmentId,
+          label: rule.label,
+          count,
+          perMillion,
+          share,
+          referenceShare: rule.referenceShare,
+          saturation: rule.referenceShare > 0 ? share / rule.referenceShare : 1,
+        });
       });
-    });
+    }
+
+    if (usable.length < chunks.length) {
+      bundle.warnings.push(
+        `${chunks.length - usable.length} of ${chunks.length} OpenStreetMap batches did not return, so some segments have no observed competition signal.`,
+      );
+    }
 
     put(bundle, {
       key: "osm.universe",
@@ -317,7 +533,7 @@ export async function fetchDensity(
     });
 
     tracer.status("src:osm", "ok", {
-      detail: `${universe.toLocaleString()} commercial premises mapped; ${rules.length} segments measured against it`,
+      detail: `${universe.toLocaleString()} commercial premises mapped; ${bySegment.size} segments measured against it`,
     });
 
     return { bySegment, universe, available: true };
