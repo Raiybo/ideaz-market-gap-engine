@@ -7,6 +7,7 @@
  * "this market is big" into "this market is big and growing".
  */
 
+import { NULL_TRACER, type Tracer } from "../engine/trace";
 import { makeBundle, put, type SignalBundle } from "./types";
 
 const WB_BASE = "https://api.worldbank.org/v2";
@@ -103,13 +104,33 @@ function computeTrend(series: WBObservation[]): number | null {
 export async function fetchWorldBank(
   iso3: string,
   currentYear: number,
+  tracer: Tracer = NULL_TRACER,
 ): Promise<SignalBundle> {
   const bundle = makeBundle(iso3);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
 
+  tracer.node({
+    id: "src:worldbank",
+    kind: "source",
+    label: "World Bank",
+    parent: `country:${iso3}`,
+    detail: `${Object.keys(INDICATORS).length} macro indicators, level and trend`,
+    status: "active",
+  });
+
   try {
     const codes = Object.keys(INDICATORS);
+    for (const code of codes) {
+      tracer.node({
+        id: `sig:${INDICATORS[code].key}`,
+        kind: "signal",
+        label: INDICATORS[code].label,
+        parent: "src:worldbank",
+        status: "active",
+      });
+    }
+
     const results = await Promise.allSettled(
       codes.map((code) => fetchIndicator(iso3, code, controller.signal)),
     );
@@ -122,6 +143,9 @@ export async function fetchWorldBank(
 
       if (result.status === "rejected" || result.value === null) {
         failures += 1;
+        tracer.status(`sig:${meta.key}`, "error", {
+          detail: "Indicator request failed",
+        });
         return;
       }
 
@@ -132,6 +156,9 @@ export async function fetchWorldBank(
 
       if (!latest) {
         bundle.warnings.push(`No ${meta.label} data published for this country.`);
+        tracer.status(`sig:${meta.key}`, "empty", {
+          detail: "No observation published for this country",
+        });
         return;
       }
 
@@ -144,6 +171,10 @@ export async function fetchWorldBank(
         source: `World Bank — ${meta.label}`,
         period: latest.date,
         confidence: confidenceForAge(year, currentYear),
+      });
+
+      tracer.status(`sig:${meta.key}`, "ok", {
+        detail: `${latest.value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${meta.unit} (${latest.date})`,
       });
 
       const trend = computeTrend(series);
@@ -165,10 +196,15 @@ export async function fetchWorldBank(
         `${failures} of ${codes.length} World Bank indicators did not return data.`,
       );
     }
+
+    tracer.status("src:worldbank", failures === codes.length ? "error" : "ok", {
+      detail: `${codes.length - failures} of ${codes.length} indicators resolved`,
+    });
   } catch (err) {
     bundle.warnings.push(
       `World Bank API unreachable (${err instanceof Error ? err.message : "unknown error"}). Scores fall back to modelled estimates.`,
     );
+    tracer.status("src:worldbank", "error", { detail: "API unreachable" });
   } finally {
     clearTimeout(timeout);
   }

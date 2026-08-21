@@ -17,6 +17,7 @@
  * one country.
  */
 
+import { NULL_TRACER, type Tracer } from "../engine/trace";
 import { put, type SignalBundle } from "./types";
 
 const OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter";
@@ -228,9 +229,20 @@ export async function fetchDensity(
   segmentIds: string[],
   population: number,
   bundle: SignalBundle,
+  tracer: Tracer = NULL_TRACER,
+  countryNodeId?: string,
 ): Promise<DensityResult> {
   const rules = DENSITY_RULES.filter((r) => segmentIds.includes(r.segmentId));
   if (rules.length === 0) return EMPTY_DENSITY;
+
+  tracer.node({
+    id: "src:osm",
+    kind: "source",
+    label: "OpenStreetMap",
+    parent: countryNodeId,
+    detail: `Counting mapped premises for ${rules.length} measurable segment${rules.length === 1 ? "" : "s"}`,
+    status: "active",
+  });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
@@ -247,6 +259,9 @@ export async function fetchDensity(
           ? `OpenStreetMap density lookup returned ${res.status}; competition estimates fall back to structural proxies.`
           : "OpenStreetMap was unreachable; competition estimates fall back to structural proxies.",
       );
+      tracer.status("src:osm", "error", {
+        detail: res ? `Overpass returned ${res.status}` : "Overpass unreachable",
+      });
       return EMPTY_DENSITY;
     }
 
@@ -258,6 +273,7 @@ export async function fetchDensity(
       bundle.warnings.push(
         "OpenStreetMap returned an incomplete response; competition estimates fall back to structural proxies.",
       );
+      tracer.status("src:osm", "error", { detail: "Incomplete response" });
       return EMPTY_DENSITY;
     }
 
@@ -269,6 +285,9 @@ export async function fetchDensity(
       bundle.warnings.push(
         `Only ${universe.toLocaleString()} commercial premises are mapped in OpenStreetMap for this country — too few to judge market saturation, so that signal is omitted.`,
       );
+      tracer.status("src:osm", "empty", {
+        detail: `Only ${universe.toLocaleString()} premises mapped — too thin to judge saturation`,
+      });
       return EMPTY_DENSITY;
     }
 
@@ -297,11 +316,18 @@ export async function fetchDensity(
       confidence: 0.7,
     });
 
+    tracer.status("src:osm", "ok", {
+      detail: `${universe.toLocaleString()} commercial premises mapped; ${rules.length} segments measured against it`,
+    });
+
     return { bySegment, universe, available: true };
   } catch (err) {
     bundle.warnings.push(
       `OpenStreetMap density lookup failed (${err instanceof Error ? err.message : "unknown error"}); competition estimates fall back to structural proxies.`,
     );
+    tracer.status("src:osm", "error", {
+      detail: err instanceof Error ? err.message : "Request failed",
+    });
     return EMPTY_DENSITY;
   } finally {
     clearTimeout(timeout);

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import type { Finding } from "@/lib/engine/scan";
 import type { Opportunity } from "@/lib/engine/score";
 
 function formatUsd(value: number): string {
@@ -83,18 +84,33 @@ interface ProductState {
   lineCount?: number;
 }
 
-export function OpportunityCard({
-  opportunity,
+/** Route badges carry a colour so the entry strategy is readable at a glance. */
+const ROUTE_TONE: Record<string, string> = {
+  substitute: "var(--positive)",
+  "finish-local": "var(--accent)",
+  distribute: "var(--accent)",
+  export: "var(--positive)",
+  service: "var(--accent)",
+  formalise: "var(--warning)",
+  differentiate: "var(--warning)",
+};
+
+export function FindingCard({
+  finding,
   rank,
   country,
+  showSector,
 }: {
-  opportunity: Opportunity;
+  finding: Finding;
   rank: number;
   country: string;
+  showSector: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [products, setProducts] = useState<ProductState>({ status: "idle" });
-  const o = opportunity;
+  const o = finding;
+  const play = finding.playbook;
+  const tone = ROUTE_TONE[play.route] ?? "var(--accent)";
   const observed = Boolean(o.tradeGap?.observed);
   const trend = o.tradeGap?.trendPct ?? null;
 
@@ -129,7 +145,14 @@ export function OpportunityCard({
 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-            <h3 className="text-base font-semibold">{o.name}</h3>
+            <div className="flex flex-wrap items-baseline gap-2">
+              <h3 className="text-base font-semibold">{o.name}</h3>
+              {showSector && (
+                <span className="rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-[11px] text-[var(--muted)]">
+                  {o.sectorName}
+                </span>
+              )}
+            </div>
             <div className="flex items-baseline gap-1.5">
               <span
                 className={`font-mono text-2xl font-semibold tabular-nums ${scoreTone(o.score)}`}
@@ -141,6 +164,14 @@ export function OpportunityCard({
           </div>
 
           <p className="mt-1 text-sm text-[var(--muted)]">{o.description}</p>
+
+          {/* What was found, in one line then in full. */}
+          <p className="mt-3 text-sm font-medium leading-snug">
+            {play.headline}
+          </p>
+          <p className="mt-1.5 text-sm leading-relaxed text-[var(--muted)]">
+            {play.finding}
+          </p>
 
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
             <span
@@ -207,6 +238,63 @@ export function OpportunityCard({
         </div>
       </div>
 
+      {/* ---- The play ------------------------------------------------------
+          A gap is not an opportunity until there is a way in. This block is
+          the answer to "so what do I actually do", sized in money and time. */}
+      <section
+        className="mt-4 rounded-lg border p-4"
+        style={{ borderColor: `color-mix(in srgb, ${tone} 35%, transparent)`, background: `color-mix(in srgb, ${tone} 6%, transparent)` }}
+      >
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span
+            className="rounded-full px-2 py-0.5 text-xs font-semibold"
+            style={{ background: `color-mix(in srgb, ${tone} 16%, transparent)`, color: tone }}
+          >
+            {play.routeName}
+          </span>
+          <span className="font-mono text-xs text-[var(--muted)]">
+            {play.capital.label} to start
+          </span>
+          <span className="font-mono text-xs text-[var(--muted)]">
+            ~{play.timeToRevenueMonths} mo to first revenue
+          </span>
+        </div>
+
+        <p className="mt-2.5 text-sm leading-relaxed">{play.thesis}</p>
+
+        {play.revenueMath.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {play.revenueMath.map((line, i) => (
+              <li
+                key={i}
+                className="font-mono text-xs tabular-nums text-[var(--muted)]"
+              >
+                {line}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {finding.beachhead && (
+          <div className="mt-3 rounded-md bg-[var(--surface-2)] p-2.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+              Start with one line, not the category
+            </p>
+            <p className="mt-1 text-sm">
+              <span className="font-mono text-xs text-[var(--muted)]">
+                HS {finding.beachhead.hsCode}
+              </span>{" "}
+              {finding.beachhead.description}
+            </p>
+            <p className="mt-1 font-mono text-xs tabular-nums text-[var(--muted)]">
+              {formatUsd(finding.beachhead.netImports)} net imports ·{" "}
+              {(finding.beachhead.importDependency * 100).toFixed(0)}% import
+              dependent — the largest single gap inside this segment.
+            </p>
+          </div>
+        )}
+      </section>
+
       <div className="mt-4 grid gap-x-6 gap-y-2.5 sm:grid-cols-2 lg:grid-cols-5">
         {COMPONENT_LABELS.map(({ key, label, hint }) => (
           <div key={key} title={hint}>
@@ -229,8 +317,8 @@ export function OpportunityCard({
           className="text-xs font-medium text-[var(--accent)] hover:underline"
         >
           {open
-            ? "Hide evidence"
-            : `Why this score — ${o.evidence.length} sources`}
+            ? "Hide the plan"
+            : `How to enter — first moves, buyers, evidence (${o.evidence.length} sources)`}
         </button>
 
         {o.hasProductDetail && (
@@ -293,7 +381,63 @@ export function OpportunityCard({
       )}
 
       {open && (
-        <div className="mt-3 space-y-3 border-t border-[var(--border)] pt-3">
+        <div className="mt-3 space-y-4 border-t border-[var(--border)] pt-3">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+                First moves
+              </p>
+              <ol className="space-y-1.5">
+                {play.firstMoves.map((move, i) => (
+                  <li key={i} className="flex gap-2 text-sm">
+                    <span className="font-mono text-xs text-[var(--muted)]">
+                      {i + 1}.
+                    </span>
+                    <span className="text-[var(--muted)]">{move}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+                  Cheapest way to prove it wrong
+                </p>
+                <p className="text-sm text-[var(--muted)]">{play.provingTest}</p>
+              </div>
+
+              <div>
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+                  Who pays
+                </p>
+                <ul className="space-y-1">
+                  {play.buyers.map((b, i) => (
+                    <li key={i} className="flex gap-2 text-sm text-[var(--muted)]">
+                      <span style={{ color: tone }}>•</span>
+                      <span>{b}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div>
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+                  Capital
+                </p>
+                <p className="text-sm text-[var(--muted)]">
+                  <span className="font-mono">{play.capital.label}</span> —{" "}
+                  {play.capital.rationale}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--border)] pt-3">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
+              Evidence
+            </p>
+            <div className="space-y-3">
           {o.evidence.map((e, i) => (
             <div key={i} className="text-sm">
               <div className="flex flex-wrap items-baseline gap-2">
@@ -309,13 +453,16 @@ export function OpportunityCard({
             </div>
           ))}
 
-          {o.risks.length > 0 && (
+            </div>
+          </div>
+
+          {play.killers.length > 0 && (
             <div className="rounded-lg bg-[var(--surface-2)] p-3">
               <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
-                Risks
+                What kills it
               </p>
               <ul className="space-y-1.5">
-                {o.risks.map((r, i) => (
+                {play.killers.map((r, i) => (
                   <li key={i} className="flex gap-2 text-sm text-[var(--muted)]">
                     <span className="text-[var(--danger)]">•</span>
                     <span>{r}</span>

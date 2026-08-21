@@ -281,11 +281,38 @@ export function scoreSegment(input: ScoreInput): Opportunity {
   } else {
     // Modelled path: no customs footprint, infer from structural indicators.
     const deficit = structuralDeficit(sector, bundle, conditions);
-    unmetDemand = 100 * clamp01(deficit.value * 0.85);
+
+    // The sector-level deficit is the same for every segment beneath it, so
+    // splitting the consumption pool equally would hand four segments of the
+    // same sector an identical figure and an identical explanation. Engel's law
+    // gives a principled split instead: at low income, staples take a larger
+    // budget share and discretionary segments a smaller one, so each segment's
+    // slice is weighted by its own elasticity relative to its siblings.
+    const engelWeight = (seg: Segment) =>
+      Math.pow(
+        Math.max(gdpPerCapita, 300) / REFERENCE_GDP_PC,
+        seg.incomeElasticity - 1,
+      );
+    const siblingWeights = sector.segments.map(engelWeight);
+    const weightTotal = siblingWeights.reduce((a, b) => a + b, 0);
+    const ownWeight = engelWeight(segment);
+    const share =
+      weightTotal > 0
+        ? ownWeight / weightTotal
+        : 1 / Math.max(sector.segments.length, 1);
+
+    // A segment that is hard to stand up locally cannot capture its whole
+    // slice of the deficit, which also separates siblings that share a sector.
+    const reachable = clamp01(
+      0.55 + 0.45 * segment.importSubstitutability - 0.3 * segment.regulatoryBurden,
+    );
+
+    unmetDemand = 100 * clamp01(deficit.value * 0.85 * (0.75 + 0.5 * reachable));
 
     const consumptionPool = gdp * sector.gdpShareBaseline;
-    const segmentPool = consumptionPool / Math.max(sector.segments.length, 1);
-    addressableUsd = segmentPool > 0 ? segmentPool * deficit.value : null;
+    const segmentPool = consumptionPool * share;
+    addressableUsd =
+      segmentPool > 0 ? segmentPool * deficit.value * reachable : null;
 
     evidence.push({
       label: "Structural deficit",
@@ -293,6 +320,16 @@ export function scoreSegment(input: ScoreInput): Opportunity {
       source: "World Bank indicators + market conditions model",
       provenance: gdp > 0 ? "live" : "modelled",
     });
+
+    if (gdp > 0) {
+      const average = 1 / Math.max(sector.segments.length, 1);
+      evidence.push({
+        label: "Segment share of the sector",
+        detail: `This segment carries ${(share * 100).toFixed(1)}% of the sector's modelled consumption pool against a ${(average * 100).toFixed(1)}% even split, because a demand elasticity of ${segment.incomeElasticity.toFixed(1)} at ${formatUsd(gdpPerCapita)} GDP per capita makes it ${ownWeight > weightTotal * average ? "a larger" : "a smaller"} share of household spend than its sector siblings. Only ${(reachable * 100).toFixed(0)}% of that slice is treated as reachable, after its regulatory load and how locally producible it is.`,
+        source: "Engel elasticity split over the sector pool",
+        provenance: "modelled",
+      });
+    }
 
     if (segment.hsCodes.length > 0) {
       evidence.push({

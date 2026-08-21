@@ -67,7 +67,7 @@ const MACRO_KEYS: Array<{ key: string; label: string }> = [
   { key: "remittances", label: "Remittances (% GDP)" },
 ];
 
-function buildMacro(bundle: SignalBundle): MacroSnapshot[] {
+export function buildMacro(bundle: SignalBundle): MacroSnapshot[] {
   const out: MacroSnapshot[] = [];
   for (const { key, label } of MACRO_KEYS) {
     const signal = bundle.signals.get(key);
@@ -82,13 +82,17 @@ function buildMacro(bundle: SignalBundle): MacroSnapshot[] {
   return out;
 }
 
-/** Comtrade rejects very long code lists; keep the request bounded. */
-function sectorHsCodes(sector: Sector): string[] {
+/**
+ * Every distinct code the sector's segments reference. The connector chunks
+ * long lists itself, so this no longer has to be truncated — a sector that
+ * spans more codes than one request allows is split rather than clipped.
+ */
+export function sectorHsCodes(sector: Sector): string[] {
   const codes = new Set<string>();
   for (const segment of sector.segments) {
     for (const code of segment.hsCodes) codes.add(code);
   }
-  return Array.from(codes).slice(0, 24);
+  return Array.from(codes);
 }
 
 export async function analyzeSector(

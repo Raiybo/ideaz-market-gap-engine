@@ -11,6 +11,7 @@
  * which lifts the rate limits.
  */
 
+import { NULL_TRACER, type Tracer } from "../engine/trace";
 import type { SignalBundle } from "./types";
 import { put } from "./types";
 
@@ -179,6 +180,63 @@ function rowsToFlows(rows: TradeRow[], year: number): Map<string, TradeFlow> {
   return flows;
 }
 
+/**
+ * Codes per request. The preview endpoint caps a response at 500 rows and, with
+ * aggregate pinning, each code yields at most two (one import, one export). 90
+ * codes therefore lands around 180 rows — comfortably inside the cap with room
+ * for reporters that split a code across several rows anyway.
+ *
+ * This is what makes a whole-country scan affordable: the 16-sector taxonomy
+ * references 68 distinct codes in total, so scanning every sector at once costs
+ * the same two requests as scanning one.
+ */
+const MAX_CODES_PER_REQUEST = 90;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+type YearResult =
+  | { status: "ok"; rows: TradeRow[]; truncated: boolean }
+  | { status: "empty" }
+  | { status: "rate-limited" };
+
+/**
+ * Fetch every chunk for a single reporting year.
+ *
+ * A year counts as empty only when no chunk returned rows; one silent chunk
+ * among several is a coverage gap in that slice of the tariff schedule, not
+ * evidence that the country failed to report.
+ */
+async function queryYearChunked(
+  reporterCode: number,
+  chunks: string[][],
+  year: number,
+  signal: AbortSignal,
+): Promise<YearResult> {
+  const rows: TradeRow[] = [];
+  let truncated = false;
+  let sawData = false;
+  let rateLimited = false;
+
+  for (const codes of chunks) {
+    const result = await queryYearWithRetry(reporterCode, codes, year, signal);
+    if (result.status === "ok") {
+      sawData = true;
+      rows.push(...result.rows);
+      if (result.rows.length >= 500) truncated = true;
+    } else if (result.status === "rate-limited") {
+      rateLimited = true;
+      break;
+    }
+  }
+
+  if (sawData) return { status: "ok", rows, truncated };
+  return rateLimited ? { status: "rate-limited" } : { status: "empty" };
+}
+
 export interface TradeData {
   /** Latest reporting year with data. */
   current: Map<string, TradeFlow>;
@@ -212,25 +270,48 @@ export async function fetchTradeFlows(
   hsCodes: string[],
   currentYear: number,
   bundle: SignalBundle,
+  tracer: Tracer = NULL_TRACER,
 ): Promise<TradeData> {
   const flows = new Map<string, TradeFlow>();
   const reporterCode = REPORTER_CODES[iso3];
+
+  tracer.node({
+    id: "src:comtrade",
+    kind: "source",
+    label: "UN Comtrade",
+    parent: `country:${iso3}`,
+    detail: `${hsCodes.length} HS codes, imports and exports against the world`,
+    status: "active",
+  });
 
   if (!reporterCode) {
     bundle.warnings.push(
       `${iso3} is not a Comtrade reporter — trade-gap analysis unavailable, scores fall back to demand modelling.`,
     );
+    tracer.status("src:comtrade", "empty", {
+      detail: `${iso3} does not report to Comtrade`,
+    });
     return EMPTY_TRADE_DATA;
   }
-  if (hsCodes.length === 0) return EMPTY_TRADE_DATA;
+  if (hsCodes.length === 0) {
+    tracer.status("src:comtrade", "empty", { detail: "No HS codes requested" });
+    return EMPTY_TRADE_DATA;
+  }
 
+  const chunks = chunk(hsCodes, MAX_CODES_PER_REQUEST);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
+  // Chunked requests are serialised behind the rate limiter, so the ceiling
+  // has to scale with how many of them there are.
+  const timeout = setTimeout(
+    () => controller.abort(),
+    20000 + chunks.length * 12000,
+  );
 
   try {
     let rows: TradeRow[] | null = null;
     let usedYear = 0;
     let throttledOut = false;
+    let truncated = false;
 
     // Try the year we already know reports data for this country first.
     const known = resolvedYear.get(iso3);
@@ -239,15 +320,17 @@ export async function fetchTradeFlows(
       : candidateYears(currentYear);
 
     for (const year of years) {
-      const result = await queryYearWithRetry(
+      tracer.note(`Probing Comtrade for ${iso3} ${year}…`);
+      const result = await queryYearChunked(
         reporterCode,
-        hsCodes,
+        chunks,
         year,
         controller.signal,
       );
 
       if (result.status === "ok") {
         rows = result.rows;
+        truncated = result.truncated;
         usedYear = year;
         resolvedYear.set(iso3, year);
         break;
@@ -256,7 +339,7 @@ export async function fetchTradeFlows(
         throttledOut = true;
         break;
       }
-      // "empty" and "error" both mean: try an earlier year.
+      // "empty" means: try an earlier year.
     }
 
     if (!rows) {
@@ -265,35 +348,59 @@ export async function fetchTradeFlows(
           ? "UN Comtrade rate limit reached, so trade gaps in this sector are modelled rather than observed. Retry shortly, or set COMTRADE_API_KEY for higher limits."
           : `Comtrade returned no trade records for ${iso3} in the last four reporting years.`,
       );
+      tracer.status("src:comtrade", throttledOut ? "error" : "empty", {
+        detail: throttledOut
+          ? "Rate limited"
+          : "No records in the last four reporting years",
+      });
       return EMPTY_TRADE_DATA;
     }
 
     // The preview endpoint caps at 500 rows. With aggregate pinning we expect
     // at most 2 rows per HS code, so hitting the cap means the response was
     // truncated and any total computed from it would be understated.
-    if (rows.length >= 500) {
+    if (truncated) {
       bundle.warnings.push(
-        "UN Comtrade returned a truncated result set for this sector; trade totals may be understated. Set COMTRADE_API_KEY to lift the preview row cap.",
+        "UN Comtrade returned a truncated result set; trade totals may be understated. Set COMTRADE_API_KEY to lift the preview row cap.",
       );
     }
 
     const currentFlows = rowsToFlows(rows, usedYear);
     for (const [code, flow] of currentFlows) flows.set(code, flow);
 
+    tracer.status("src:comtrade", "ok", {
+      detail: `${flows.size} of ${hsCodes.length} HS codes reported in ${usedYear} (${chunks.length} request${chunks.length === 1 ? "" : "s"})`,
+    });
+
     // Trajectory baseline. A failure here is not fatal — the gap is still
     // reported, just without a direction of travel.
     let baseline: Map<string, TradeFlow> | null = null;
     let baselineYear: number | null = null;
     const baseTarget = usedYear - TREND_LOOKBACK;
-    const baseResult = await queryYearWithRetry(
+    tracer.node({
+      id: "src:comtrade-baseline",
+      kind: "source",
+      label: `Baseline ${baseTarget}`,
+      parent: "src:comtrade",
+      detail: "Same codes three years earlier, for direction of travel",
+      status: "active",
+    });
+    const baseResult = await queryYearChunked(
       reporterCode,
-      hsCodes,
+      chunks,
       baseTarget,
       controller.signal,
     );
     if (baseResult.status === "ok") {
       baseline = rowsToFlows(baseResult.rows, baseTarget);
       baselineYear = baseTarget;
+      tracer.status("src:comtrade-baseline", "ok", {
+        detail: `${baseline.size} codes reported in ${baseTarget}`,
+      });
+    } else {
+      tracer.status("src:comtrade-baseline", "empty", {
+        detail: "No comparable earlier year — trajectory unavailable",
+      });
     }
 
     // Record the aggregate as a signal so the UI can cite it.
@@ -333,6 +440,9 @@ export async function fetchTradeFlows(
     bundle.warnings.push(
       `Comtrade request failed (${err instanceof Error ? err.message : "unknown error"}); trade gaps for this sector are modelled, not observed.`,
     );
+    tracer.status("src:comtrade", "error", {
+      detail: err instanceof Error ? err.message : "Request failed",
+    });
     return EMPTY_TRADE_DATA;
   } finally {
     clearTimeout(timeout);

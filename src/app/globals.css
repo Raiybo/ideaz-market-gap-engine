@@ -57,3 +57,70 @@ body {
   background: var(--border);
   border-radius: 3px;
 }
+
+/* ---- Reasoning graph ----------------------------------------------------- */
+
+/* Nodes ease to their target position instead of jumping, so the graph reads
+   as one structure rearranging rather than a list of things appearing. */
+.rg-node {
+  transition:
+    transform 700ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 400ms ease;
+}
+
+.rg-pulse {
+  animation: rg-pulse 1.3s ease-in-out infinite;
+  transform-origin: center;
+}
+
+@keyframes rg-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    r: var(--rg-r);
+  }
+  50% {
+    opacity: 0;
+    r: calc(var(--rg-r) * 2.6);
+  }
+}
+
+.rg-edge {
+  transition: stroke 500ms ease, opacity 500ms ease;
+}
+
+.rg-edge-active {
+  stroke-dasharray: 4 6;
+  animation: rg-flow 900ms linear infinite;
+}
+
+@keyframes rg-flow {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+
+.rg-appear {
+  animation: rg-appear 450ms ease-out both;
+}
+
+@keyframes rg-appear {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rg-node,
+  .rg-edge {
+    transition: none;
+  }
+  .rg-pulse,
+  .rg-edge-active,
+  .rg-appear {
+    animation: none;
+  }
+}
