@@ -72,8 +72,22 @@ function candidateYears(currentYear: number): number[] {
  * reported no trade" — which silently turns a throttling problem into a
  * false finding of zero imports. Every request therefore goes through a
  * single-file queue, and 429s are retried rather than swallowed.
+ *
+ * A subscription key buys a much higher ceiling, and holding keyed traffic to
+ * the keyless pace made the key worthless: it changed which endpoint we call
+ * without changing how fast we could call it. Eight consecutive keyed requests
+ * at 3.3/s all returned 200, and UN Comtrade documents 5/s for its premium
+ * tier, so 2.5/s leaves real headroom while roughly tripling scan throughput.
+ * Both paths keep the same queue and the same 429 handling, so if the ceiling
+ * turns out to be lower than measured the retry path still covers us.
  */
-const MIN_INTERVAL_MS = 1200;
+const KEYLESS_INTERVAL_MS = 1200;
+const KEYED_INTERVAL_MS = 400;
+
+function minInterval(): number {
+  return process.env.COMTRADE_API_KEY ? KEYED_INTERVAL_MS : KEYLESS_INTERVAL_MS;
+}
+
 let lastRequestAt = 0;
 let requestQueue: Promise<unknown> = Promise.resolve();
 
@@ -81,7 +95,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function throttled<T>(fn: () => Promise<T>): Promise<T> {
   const run = requestQueue.then(async () => {
-    const wait = MIN_INTERVAL_MS - (Date.now() - lastRequestAt);
+    const wait = minInterval() - (Date.now() - lastRequestAt);
     if (wait > 0) await sleep(wait);
     lastRequestAt = Date.now();
     return fn();
