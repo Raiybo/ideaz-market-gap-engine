@@ -73,6 +73,61 @@ function confidenceForAge(year: number, now: number): number {
  */
 const INDICATOR_TIMEOUT_MS = 20000;
 
+/**
+ * How many indicator requests are allowed in flight at once, and how many
+ * attempts each gets.
+ *
+ * Firing all twenty-six at once is what the World Bank throttles: a cold scan
+ * of Vietnam lost eighteen of them to timeouts while the Philippines, run a
+ * moment later, lost none. That is load shedding on their side, not a country
+ * without data — and a scan missing two-thirds of its macro indicators still
+ * produces scores, silently derived from far less than it claims. Bounding the
+ * fan-out and retrying once turns a burst they refuse into a queue they serve.
+ */
+const INDICATOR_CONCURRENCY = 6;
+const INDICATOR_ATTEMPTS = 2;
+const RETRY_BACKOFF_MS = 700;
+
+/** Runs tasks with a bounded number in flight, preserving input order. */
+async function mapWithLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const out = new Array<PromiseSettledResult<R>>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        out[i] = { status: "fulfilled", value: await fn(items[i]) };
+      } catch (reason) {
+        out[i] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+async function fetchIndicatorWithRetry(
+  iso3: string,
+  indicator: string,
+): Promise<WBObservation[] | null> {
+  for (let attempt = 1; attempt <= INDICATOR_ATTEMPTS; attempt += 1) {
+    try {
+      const result = await fetchIndicator(iso3, indicator);
+      if (result !== null) return result;
+    } catch {
+      // Fall through to the retry; the last attempt reports the failure.
+    }
+    if (attempt < INDICATOR_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * attempt));
+    }
+  }
+  return null;
+}
+
 async function fetchIndicator(
   iso3: string,
   indicator: string,
@@ -144,8 +199,8 @@ export async function fetchWorldBank(
       });
     }
 
-    const results = await Promise.allSettled(
-      codes.map((code) => fetchIndicator(iso3, code)),
+    const results = await mapWithLimit(codes, INDICATOR_CONCURRENCY, (code) =>
+      fetchIndicatorWithRetry(iso3, code),
     );
 
     let failures = 0;
