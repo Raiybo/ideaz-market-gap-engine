@@ -84,10 +84,15 @@ const WEIGHTS = {
 const REFERENCE_GDP_PC = 12000;
 
 function formatUsd(value: number): string {
-  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
-  if (value >= 1e6) return `$${(value / 1e6).toFixed(1)}M`;
-  if (value >= 1e3) return `$${(value / 1e3).toFixed(0)}K`;
-  return `$${value.toFixed(0)}`;
+  // Net trade flows go negative for a net exporter. Comparing a negative
+  // against the magnitude thresholds fails every one of them and falls through
+  // to raw digits, which is how "$-4542071604" reached the page.
+  const sign = value < 0 ? "-" : "";
+  const v = Math.abs(value);
+  if (v >= 1e9) return `${sign}$${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `${sign}$${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${sign}$${(v / 1e3).toFixed(0)}K`;
+  return `${sign}$${v.toFixed(0)}`;
 }
 
 /**
@@ -248,7 +253,11 @@ export function scoreSegment(input: ScoreInput): Opportunity {
 
     evidence.push({
       label: "Trade gap",
-      detail: `Imports ${formatUsd(gap.imports)} against exports ${formatUsd(gap.exports)} (${(dependency * 100).toFixed(0)}% import-dependent). Net ${formatUsd(gap.netImports)} leaves the country each year for goods in this category.`,
+      detail: `Imports ${formatUsd(gap.imports)} against exports ${formatUsd(gap.exports)} (${(dependency * 100).toFixed(0)}% import-dependent). ${
+        gap.netImports > 0
+          ? `Net ${formatUsd(gap.netImports)} leaves the country each year for goods in this category.`
+          : `Net ${formatUsd(-gap.netImports)} more leaves as exports than arrives, making the country a net supplier here.`
+      }`,
       source: `UN Comtrade, ${gap.year}`,
       provenance: "live",
     });

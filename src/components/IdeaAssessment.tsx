@@ -14,6 +14,7 @@
 import { useRef, useState } from "react";
 
 import type { ValidateResult } from "@/app/api/validate/route";
+import { COUNTRY_BY_ISO3 } from "@/lib/domain/countries";
 import type { Standing } from "@/lib/ideas/verdict";
 import { FindingCard } from "@/components/FindingCard";
 
@@ -358,6 +359,7 @@ export function IdeaAssessment({
           finding={finding}
           rank={verdict.rank}
           country={country.iso3}
+          conditions={COUNTRY_BY_ISO3.get(country.iso3)?.conditions}
           showSector
         />
       </div>

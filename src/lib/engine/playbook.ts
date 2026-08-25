@@ -83,7 +83,7 @@ const BANDS: Array<{ ceiling: number; label: string; low: number; high: number }
   { ceiling: 1.1, label: "$8M+", low: 8_000_000, high: 40_000_000 },
 ];
 
-function capitalFor(
+export function capitalFor(
   segment: Segment,
   route: EntryRouteId,
   conditions: MarketConditions,
@@ -156,7 +156,7 @@ function chooseRoute(input: RouteInput): EntryRouteId {
   return "substitute";
 }
 
-const ROUTE_NAMES: Record<EntryRouteId, string> = {
+export const ROUTE_NAMES: Record<EntryRouteId, string> = {
   substitute: "Make it here",
   "finish-local": "Import bulk, finish locally",
   distribute: "Own the channel",
@@ -188,7 +188,9 @@ function buildFinding(input: RouteInput): { headline: string; finding: string } 
     const dep = pct(gap.importDependency);
     const sentences = [
       `${countryName} imported ${formatUsd(gap.imports)} of ${segment.name.toLowerCase()} in ${gap.year} and exported ${formatUsd(gap.exports)}, meaning ${dep} of what the country consumes in this category is made somewhere else.`,
-      `Net ${formatUsd(gap.netImports)} leaves the country every year to pay for it.`,
+      gap.netImports > 0
+        ? `Net ${formatUsd(gap.netImports)} leaves the country every year to pay for it.`
+        : `Net ${formatUsd(-gap.netImports)} more goes out as exports than comes in, so on balance the country supplies this category rather than buying it.`,
     ];
 
     if (gap.trendPct !== null && gap.trendBaseYear) {
@@ -208,7 +210,10 @@ function buildFinding(input: RouteInput): { headline: string; finding: string } 
     }
 
     return {
-      headline: `${formatUsd(gap.netImports)} a year leaves ${countryName} for ${segment.name.toLowerCase()} — ${dep} of the category is imported.`,
+      headline:
+        gap.netImports > 0
+          ? `${formatUsd(gap.netImports)} a year leaves ${countryName} for ${segment.name.toLowerCase()} — ${dep} of the category is imported.`
+          : `${countryName} is a net supplier of ${segment.name.toLowerCase()} — ${formatUsd(-gap.netImports)} a year more goes out than comes in, though ${dep} of what it consumes is still imported.`,
       finding: sentences.join(" "),
     };
   }

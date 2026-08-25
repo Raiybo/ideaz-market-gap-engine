@@ -20,10 +20,15 @@ import { deltasFor, useWatchlist } from "@/lib/watchlist";
 const VISIBLE_FINDINGS = 12;
 
 function formatUsd(value: number): string {
-  if (value >= 1e9) return `$${(value / 1e9).toFixed(1)}B`;
-  if (value >= 1e6) return `$${(value / 1e6).toFixed(0)}M`;
-  if (value >= 1e3) return `$${(value / 1e3).toFixed(0)}K`;
-  return `$${value.toFixed(0)}`;
+  // Net trade flows go negative for a net exporter. Comparing a negative
+  // against the magnitude thresholds fails every one of them and falls through
+  // to raw digits, which is how "$-4542071604" reached the page.
+  const sign = value < 0 ? "-" : "";
+  const v = Math.abs(value);
+  if (v >= 1e9) return `${sign}$${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `${sign}$${(v / 1e6).toFixed(0)}M`;
+  if (v >= 1e3) return `${sign}$${(v / 1e3).toFixed(0)}K`;
+  return `${sign}$${v.toFixed(0)}`;
 }
 
 type Mode = "find" | "test";
@@ -442,6 +447,7 @@ function Home() {
                 rank={i + 1}
                 country={scan.country.iso3}
                 showSector={scan.scope === "country"}
+                conditions={scan.conditions}
               />
             ))}
 

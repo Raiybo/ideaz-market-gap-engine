@@ -2,15 +2,23 @@
 
 import { useState } from "react";
 
+import { GapSurvey } from "@/components/GapSurvey";
+import type { MarketConditions } from "@/lib/domain/countries";
+import { ALL_SEGMENTS } from "@/lib/domain/sectors";
 import type { Finding } from "@/lib/engine/scan";
 import type { Opportunity } from "@/lib/engine/score";
 import { toggleWatch, useIsWatched } from "@/lib/watchlist";
 
 function formatUsd(value: number): string {
-  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
-  if (value >= 1e6) return `$${(value / 1e6).toFixed(1)}M`;
-  if (value >= 1e3) return `$${(value / 1e3).toFixed(0)}K`;
-  return `$${value.toFixed(0)}`;
+  // Net trade flows go negative for a net exporter. Comparing a negative
+  // against the magnitude thresholds fails every one of them and falls through
+  // to raw digits, which is how "$-4542071604" reached the page.
+  const sign = value < 0 ? "-" : "";
+  const v = Math.abs(value);
+  if (v >= 1e9) return `${sign}$${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `${sign}$${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${sign}$${(v / 1e3).toFixed(0)}K`;
+  return `${sign}$${v.toFixed(0)}`;
 }
 
 function scoreTone(score: number): string {
@@ -116,11 +124,17 @@ export function FindingCard({
   rank,
   country,
   showSector,
+  conditions,
 }: {
   finding: Finding;
   rank: number;
   country: string;
   showSector: boolean;
+  /**
+   * Absent on the idea-assessment path, where the reader has already chosen
+   * what they are building. Without it the card falls back to the plan alone.
+   */
+  conditions?: MarketConditions;
 }) {
   const [open, setOpen] = useState(false);
   const [products, setProducts] = useState<ProductState>({ status: "idle" });
@@ -152,6 +166,11 @@ export function FindingCard({
     }
   }
   const play = finding.playbook;
+  // Looked up rather than drilled through the page: the card already knows the
+  // segment id, and the taxonomy is a static import on both sides.
+  const segment = ALL_SEGMENTS.find(
+    (s) => s.segment.id === finding.segmentId,
+  )?.segment;
   const tone = ROUTE_TONE[play.route] ?? "var(--accent)";
   const observed = Boolean(o.tradeGap?.observed);
   const trend = o.tradeGap?.trendPct ?? null;
@@ -388,7 +407,7 @@ export function FindingCard({
         >
           {open
             ? "Hide the plan"
-            : `How to enter — first moves, buyers, evidence (${o.evidence.length} sources)`}
+            : `Find my angle — 5 questions, then the plan (${o.evidence.length} sources)`}
         </button>
 
         {o.hasProductDetail && (
@@ -512,6 +531,16 @@ export function FindingCard({
             </table>
           )}
         </div>
+      )}
+
+      {open && segment && conditions && (
+        <GapSurvey
+          playbook={play}
+          segment={segment}
+          conditions={conditions}
+          physical={segment.hsCodes.length > 0}
+          segmentName={o.name}
+        />
       )}
 
       {open && (
