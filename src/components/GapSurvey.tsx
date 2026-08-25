@@ -21,7 +21,19 @@ import type { MarketConditions } from "@/lib/domain/countries";
 import type { Segment } from "@/lib/domain/sectors";
 import { fitOperator, type OperatorProfile } from "@/lib/engine/operator";
 import type { Playbook } from "@/lib/engine/playbook";
+import type { CountryScan, Finding } from "@/lib/engine/scan";
 import { formatUsd } from "@/lib/engine/score";
+import {
+  angleFolderName,
+  buildAngleRecord,
+  buildDossierMarkdown,
+} from "@/lib/export/dossier";
+import {
+  chooseFolder,
+  folderApiSupported,
+  saveAngle,
+  type SaveOutcome,
+} from "@/lib/export/folder";
 import {
   clearProfile,
   isComplete,
@@ -126,6 +138,9 @@ export interface GapSurveyProps {
   conditions: MarketConditions;
   physical: boolean;
   segmentName: string;
+  /** Present on the scan path only; without it there is nothing to save. */
+  scan?: CountryScan;
+  finding?: Finding;
 }
 
 export function GapSurvey({
@@ -134,10 +149,14 @@ export function GapSurvey({
   conditions,
   physical,
   segmentName,
+  scan,
+  finding,
 }: GapSurveyProps) {
   const profile = useOperatorProfile();
   const [step, setStep] = useState(0);
   const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [outcome, setOutcome] = useState<SaveOutcome | null>(null);
 
   const complete = isComplete(profile);
   const showResult = complete && !editing;
@@ -146,6 +165,30 @@ export function GapSurvey({
     if (!isComplete(profile)) return null;
     return fitOperator({ playbook, segment, conditions, profile, physical });
   }, [playbook, segment, conditions, profile, physical]);
+
+  async function save(pickNewFolder: boolean) {
+    if (!scan || !finding || !isComplete(profile) || !fit) return;
+    setSaving(true);
+    setOutcome(null);
+    try {
+      if (pickNewFolder && folderApiSupported()) await chooseFolder();
+      const savedAt = new Date();
+      const record = buildAngleRecord(scan, finding, profile, fit, savedAt);
+      const result = await saveAngle(angleFolderName(scan, finding, savedAt), {
+        "dossier.md": buildDossierMarkdown(record),
+        // Same content, structured, so two angles can be merged later.
+        "angle.json": JSON.stringify(record, null, 2),
+      });
+      setOutcome(result);
+    } catch (err) {
+      setOutcome({
+        status: "error",
+        message: err instanceof Error ? err.message : "Save failed.",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
 
   if (showResult && fit) {
     const style = VERDICT_STYLE[fit.verdict];
@@ -237,6 +280,59 @@ export function GapSurvey({
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+
+        {scan && finding && (
+          <div className="mt-4 border-t border-[var(--border)] pt-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={() => save(false)}
+                disabled={saving}
+                className="rounded-lg border border-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent)] hover:bg-[var(--surface)] disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save this angle to my folder"}
+              </button>
+              {folderApiSupported() && (
+                <button
+                  onClick={() => save(true)}
+                  disabled={saving}
+                  className="text-xs text-[var(--muted)] hover:underline disabled:opacity-50"
+                >
+                  Choose a different folder
+                </button>
+              )}
+            </div>
+
+            <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">
+              {folderApiSupported()
+                ? "Writes a dossier and a machine-readable angle.json into their own subfolder. The first save asks which folder to use — pick “Ideaz in detail” on your Desktop — and it is remembered after that."
+                : "This browser cannot write into a folder, so the two files download instead and need moving by hand. Chrome or Edge on the desktop can write directly."}
+            </p>
+
+            {outcome && (
+              <p
+                className="mt-2 font-mono text-[11px]"
+                style={{
+                  color:
+                    outcome.status === "written" ||
+                    outcome.status === "downloaded"
+                      ? "var(--positive)"
+                      : outcome.status === "error" || outcome.status === "denied"
+                        ? "var(--danger)"
+                        : "var(--muted)",
+                }}
+              >
+                {outcome.status === "written" &&
+                  `Written to ${outcome.folder}/ — ${outcome.files.join(", ")}`}
+                {outcome.status === "downloaded" &&
+                  `Downloaded ${outcome.files.length} files to your downloads folder.`}
+                {outcome.status === "denied" &&
+                  "Permission to write to that folder was refused."}
+                {outcome.status === "cancelled" && "No folder chosen."}
+                {outcome.status === "error" && `Save failed: ${outcome.message}`}
+              </p>
+            )}
           </div>
         )}
       </div>

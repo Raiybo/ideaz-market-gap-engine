@@ -448,6 +448,7 @@ function Home() {
                 country={scan.country.iso3}
                 showSector={scan.scope === "country"}
                 conditions={scan.conditions}
+                scan={scan}
               />
             ))}
 

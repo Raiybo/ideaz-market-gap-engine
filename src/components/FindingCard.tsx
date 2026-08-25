@@ -5,7 +5,7 @@ import { useState } from "react";
 import { GapSurvey } from "@/components/GapSurvey";
 import type { MarketConditions } from "@/lib/domain/countries";
 import { ALL_SEGMENTS } from "@/lib/domain/sectors";
-import type { Finding } from "@/lib/engine/scan";
+import type { CountryScan, Finding } from "@/lib/engine/scan";
 import type { Opportunity } from "@/lib/engine/score";
 import { toggleWatch, useIsWatched } from "@/lib/watchlist";
 
@@ -125,6 +125,7 @@ export function FindingCard({
   country,
   showSector,
   conditions,
+  scan,
 }: {
   finding: Finding;
   rank: number;
@@ -135,6 +136,9 @@ export function FindingCard({
    * what they are building. Without it the card falls back to the plan alone.
    */
   conditions?: MarketConditions;
+  /** Present on the scan path only; carries the field and country context a
+      saved angle needs. */
+  scan?: CountryScan;
 }) {
   const [open, setOpen] = useState(false);
   const [products, setProducts] = useState<ProductState>({ status: "idle" });
@@ -540,6 +544,8 @@ export function FindingCard({
           conditions={conditions}
           physical={segment.hsCodes.length > 0}
           segmentName={o.name}
+          scan={scan}
+          finding={finding}
         />
       )}
 
