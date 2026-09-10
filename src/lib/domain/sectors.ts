@@ -52,6 +52,12 @@ export interface Sector {
   supplyIndicator: string | null;
   /** Typical share of an economy this sector captures. Used to size demand. */
   gdpShareBaseline: number;
+  /**
+   * True where the sector's buyers are defence or security agencies. Kept as a
+   * flag rather than a naming convention so a scan can exclude it outright —
+   * a gap you will not enter is noise, not information.
+   */
+  defence?: boolean;
   segments: Segment[];
 }
 
@@ -653,6 +659,51 @@ export const SECTORS: Sector[] = [
         timeToRevenueMonths: 9,
         laborIntensity: 0.5,
         incomeElasticity: 1.4,
+        b2b: true,
+      },
+      {
+        id: "tech-sensors",
+        name: "Sensors & Instrumentation",
+        description:
+          "Measuring, checking and analysis instruments — the input layer AI runs on.",
+        hsCodes: ["9031", "9026", "9027"],
+        capitalIntensity: 0.5,
+        regulatoryBurden: 0.3,
+        infrastructureDependency: 0.55,
+        importSubstitutability: 0.5,
+        timeToRevenueMonths: 14,
+        laborIntensity: 0.45,
+        incomeElasticity: 1.3,
+        b2b: true,
+      },
+      {
+        id: "tech-audio",
+        name: "Audio & Voice Hardware",
+        description:
+          "Microphones, speakers, headsets and audio front-ends for voice interfaces.",
+        hsCodes: ["8518"],
+        capitalIntensity: 0.45,
+        regulatoryBurden: 0.22,
+        infrastructureDependency: 0.5,
+        importSubstitutability: 0.5,
+        timeToRevenueMonths: 12,
+        laborIntensity: 0.5,
+        incomeElasticity: 1.4,
+        b2b: false,
+      },
+      {
+        id: "tech-smartbuilding",
+        name: "Smart Building & Controls",
+        description:
+          "Automatic regulating instruments, sensors and signalling for buildings.",
+        hsCodes: ["9032", "8531"],
+        capitalIntensity: 0.48,
+        regulatoryBurden: 0.4,
+        infrastructureDependency: 0.6,
+        importSubstitutability: 0.55,
+        timeToRevenueMonths: 14,
+        laborIntensity: 0.55,
+        incomeElasticity: 1.2,
         b2b: true,
       },
       {
@@ -1386,6 +1437,7 @@ export const SECTORS: Sector[] = [
   {
     id: "defence",
     name: "Defence & Security",
+    defence: true,
     icon: "🛡️",
     blurb:
       "Measured from published UN trade statistics. Scored with heavy regulatory weight, because licensing and export control bind harder here than capital does — a gap can be real and still be closed to you.",
@@ -1585,9 +1637,68 @@ export const SECTORS: Sector[] = [
       },
     ],
   },
+  {
+    id: "additive",
+    name: "Additive Manufacturing & Prototyping",
+    icon: "🖨️",
+    blurb:
+      "Machines, feedstock and short-run production. Measured from customs data, and the one sector here whose whole purpose is making a physical thing before committing to tooling.",
+    supplyIndicator: "NV.IND.MANF.ZS",
+    gdpShareBaseline: 0.008,
+    segments: [
+      {
+        id: "am-systems",
+        name: "Additive Manufacturing Systems",
+        description:
+          "Industrial and desktop machines for additive manufacturing.",
+        hsCodes: ["8485"],
+        capitalIntensity: 0.62,
+        regulatoryBurden: 0.25,
+        infrastructureDependency: 0.6,
+        importSubstitutability: 0.45,
+        timeToRevenueMonths: 18,
+        laborIntensity: 0.45,
+        incomeElasticity: 1.4,
+        b2b: true,
+      },
+      {
+        id: "am-materials",
+        name: "Engineering Polymers & Feedstock",
+        description:
+          "Filament, resin and powder feedstock for additive production.",
+        hsCodes: ["3916", "3920"],
+        capitalIntensity: 0.55,
+        regulatoryBurden: 0.3,
+        infrastructureDependency: 0.65,
+        importSubstitutability: 0.6,
+        timeToRevenueMonths: 14,
+        laborIntensity: 0.4,
+        incomeElasticity: 1.2,
+        b2b: true,
+      },
+      {
+        id: "am-service",
+        name: "Prototyping & Short-Run Production",
+        description:
+          "Contract prototyping and low-volume parts for other builders.",
+        hsCodes: [],
+        // The cheapest way into hardware: sell capacity before owning a product.
+        capitalIntensity: 0.3,
+        regulatoryBurden: 0.2,
+        infrastructureDependency: 0.45,
+        importSubstitutability: 1.0,
+        timeToRevenueMonths: 6,
+        laborIntensity: 0.6,
+        incomeElasticity: 1.3,
+        b2b: true,
+      },
+    ],
+  },
 ];
 
 export const SECTOR_BY_ID = new Map(SECTORS.map((s) => [s.id, s]));
+
+export const CIVILIAN_SECTORS: Sector[] = SECTORS.filter((s) => !s.defence);
 
 export const ALL_SEGMENTS: Array<{ sector: Sector; segment: Segment }> =
   SECTORS.flatMap((sector) =>

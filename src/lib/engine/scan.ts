@@ -131,6 +131,12 @@ const DRILL_DOWN_TOP_N = 3;
 const DENSITY_DEADLINE_MS = 22000;
 
 export interface ScanOptions {
+  /**
+   * Excludes defence sectors from a whole-country scan. An explicit sectorId
+   * still wins — asking for a sector by name is a deliberate act, and silently
+   * returning nothing would be worse than returning what was asked for.
+   */
+  civilianOnly?: boolean;
   /** Restrict to one sector. Omit to scan the whole country. */
   sectorId?: string;
   tracer?: Tracer;
@@ -202,6 +208,7 @@ export async function scanCountry(
   options: ScanOptions = {},
 ): Promise<CountryScan> {
   const {
+    civilianOnly,
     sectorId,
     tracer = NULL_TRACER,
     drillDown = true,
@@ -214,7 +221,9 @@ export async function scanCountry(
 
   const sectors: Sector[] = sectorId
     ? [SECTOR_BY_ID.get(sectorId)].filter((s): s is Sector => Boolean(s))
-    : SECTORS;
+    : civilianOnly
+      ? SECTORS.filter((s) => !s.defence)
+      : SECTORS;
   if (sectorId && sectors.length === 0) {
     throw new Error(`Unknown sector: ${sectorId}`);
   }

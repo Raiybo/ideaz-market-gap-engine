@@ -141,7 +141,12 @@ async function readTraceStream(
  * idea-assessment mode. Firing a country scan nobody asked for spends the
  * Comtrade rate limit that the assessment is about to need.
  */
-export function useScanStream(country: string, scope: string, enabled = true) {
+export function useScanStream(
+  country: string,
+  scope: string,
+  enabled = true,
+  civilianOnly = false,
+) {
   const [state, setState] = useState<TraceStreamState<CountryScan>>(
     initialState<CountryScan>,
   );
@@ -179,7 +184,7 @@ export function useScanStream(country: string, scope: string, enabled = true) {
     (async () => {
       try {
         const res = await fetch(
-          `/api/scan?country=${country}&sector=${scope}&stream=1`,
+          `/api/scan?country=${country}&sector=${scope}&stream=1${civilianOnly ? "&civilian=1" : ""}`,
           { signal: controller.signal, headers: { accept: "text/event-stream" } },
         );
         if (!res.ok || !res.body) {
@@ -201,7 +206,7 @@ export function useScanStream(country: string, scope: string, enabled = true) {
       controller.abort();
       if (frame) cancelAnimationFrame(frame);
     };
-  }, [country, scope, nonce, enabled]);
+  }, [country, scope, nonce, enabled, civilianOnly]);
 
   return { ...state, scan: state.result, rerun };
 }

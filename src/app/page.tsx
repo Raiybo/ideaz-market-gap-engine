@@ -65,12 +65,22 @@ function Home() {
     params.get("mode") === "test" ? "test" : "find",
   );
   const [file, setFile] = useState<File | null>(null);
+  // Defence gaps are real and measurable, and excluding them is a choice about
+  // what you are willing to build, not about what the data says.
+  const [civilianOnly, setCivilianOnly] = useState(
+    () => params.get("civilian") === "1",
+  );
   const watchlist = useWatchlist();
 
   // replaceState rather than router.push: this is the same view with different
   // inputs, and it should not stack a history entry per click.
   const syncUrl = useCallback(
-    (next: { country?: string; sector?: string; mode?: Mode }) => {
+    (next: {
+      country?: string;
+      sector?: string;
+      mode?: Mode;
+      civilian?: boolean;
+    }) => {
       if (typeof window === "undefined") return;
       const url = new URL(window.location.href);
       const set = (key: string, value: string | undefined, fallback: string) => {
@@ -81,6 +91,11 @@ function Home() {
       set("country", next.country, DEFAULT_COUNTRY);
       set("sector", next.sector, "all");
       set("mode", next.mode, "find");
+      set(
+        "civilian",
+        next.civilian === undefined ? undefined : next.civilian ? "1" : "0",
+        "0",
+      );
       window.history.replaceState(null, "", url);
     },
     [],
@@ -114,7 +129,22 @@ function Home() {
     [syncUrl],
   );
 
-  const scanStream = useScanStream(country, scope, mode === "find");
+  const toggleCivilian = useCallback(() => {
+    setCivilianOnly((prev) => {
+      const next = !prev;
+      syncUrl({ civilian: next });
+      return next;
+    });
+    setShowAll(false);
+    setGraphOpen(true);
+  }, [syncUrl]);
+
+  const scanStream = useScanStream(
+    country,
+    scope,
+    mode === "find",
+    civilianOnly,
+  );
   const idea = useValidateStream();
 
   // Both modes drive the same graph; whichever one is live owns it.
@@ -234,12 +264,44 @@ function Home() {
         </div>
       )}
 
+      {/* Civilian filter — a statement about what you will build, not what exists. */}
+      {mode === "find" && (
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <button
+            onClick={toggleCivilian}
+            aria-pressed={civilianOnly}
+            className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+              civilianOnly
+                ? "border-[var(--accent)] text-[var(--accent)]"
+                : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)]"
+            }`}
+          >
+            <span
+              className="inline-block h-2 w-2 rounded-full"
+              style={{
+                background: civilianOnly ? "var(--accent)" : "var(--border)",
+              }}
+            />
+            Civilian only
+          </button>
+          <span className="text-xs text-[var(--muted)]">
+            {civilianOnly
+              ? "Defence & Security is excluded from scans and hidden below."
+              : "All 21 sectors included, defence among them."}
+          </span>
+        </div>
+      )}
+
       {/* Scope rail — the whole country, or one sector in depth. */}
       {mode === "find" && (
       <nav className="rail -mx-4 mb-5 flex gap-2 overflow-x-auto px-4 pb-2 sm:mx-0 sm:px-0">
         {[
           { id: "all", icon: "🌍", name: "Whole country" },
-          ...SECTORS.map((s) => ({ id: s.id, icon: s.icon, name: s.name })),
+          ...SECTORS.filter((s) => !(civilianOnly && s.defence)).map((s) => ({
+            id: s.id,
+            icon: s.icon,
+            name: s.name,
+          })),
         ].map((s) => (
           <button
             key={s.id}

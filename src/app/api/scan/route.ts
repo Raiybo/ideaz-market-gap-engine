@@ -37,6 +37,7 @@ function resolve(request: Request) {
     sectorId,
     stream: searchParams.get("stream") === "1",
     drillDown: searchParams.get("drill") !== "0",
+    civilianOnly: searchParams.get("civilian") === "1",
   };
 }
 
@@ -49,11 +50,11 @@ export async function GET(request: Request) {
     );
   }
 
-  const { country, sectorId, stream, drillDown } = resolved;
+  const { country, sectorId, stream, drillDown, civilianOnly } = resolved;
 
   if (!stream) {
     try {
-      const scan = await scanCountry(country, { sectorId, drillDown });
+      const scan = await scanCountry(country, { sectorId, drillDown, civilianOnly });
       return Response.json(scan);
     } catch (err) {
       return Response.json(
@@ -89,6 +90,7 @@ export async function GET(request: Request) {
         const scan = await scanCountry(country, {
           sectorId,
           drillDown,
+          civilianOnly,
           tracer: makeTracer(send),
         });
         send({ t: "result", payload: scan });
